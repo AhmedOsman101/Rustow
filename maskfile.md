@@ -84,13 +84,34 @@ cargo run --quiet --example generate_schema
 cargo run --quiet --example generate_schema -- --check
 ~~~
 
+## container
+
+> Container commands.
+
+### build
+
+> Build the container
+
+~~~bash
+podman build -t rustow-e2e -f Dockerfile .
+~~~
+
+### run [args]
+
+> Run a command on the container
+
+~~~bash
+eval "argv=(${args[@]})"
+podman run --rm -v "$PWD:/app" -w /app rustow-e2e -- "${argv[@]}"
+~~~
+
 ## e2e
 
 > Run the end-to-end scenario in a Void Linux podman container
 
 ~~~sh
-podman build -t rustow-e2e -f Dockerfile .
-podman run --rm -v "$PWD:/app" -w /app rustow-e2e bash tests/e2e.sh
+$MASK container build
+$MASK container run "bash tests/e2e.sh"
 ~~~
 
 ## check
