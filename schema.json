@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "diff_tool": {
+      "description": "Command template for the merge diff tool, e.g. \"meld {left} {right}\".\nWins over the built-in registry and $EDITOR when set.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fold": {
+      "description": "Fold package directories into single symlinks where possible.",
+      "type": "boolean",
+      "default": true
+    },
+    "ignore": {
+      "description": "Extra glob patterns ignored on top of the built-in stow default list.",
+      "type": "array",
+      "default": [
+        "RCS",
+        ".+,v",
+        "CVS",
+        "\\.\\#.+",
+        "\\.cvsignore",
+        "\\.svn",
+        "_darcs",
+        "\\.hg",
+        ".git",
+        ".gitignore",
+        ".gitmodules",
+        ".+~",
+        "\\#.*\\#",
+        "^/README.*",
+        "^/LICENSE.*",
+        "^/COPYING"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "on_conflict": {
+      "description": "What to do when a real file already occupies a target path.",
+      "$ref": "#/$defs/ConflictPolicy",
+      "default": "prompt"
+    },
+    "source": {
+      "description": "Stow directory; its direct subdirectories are the packages.\nNo default — rustow errors out until it is set.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "target": {
+      "description": "Link destination root; defaults to $HOME.",
+      "type": "string",
+      "default": "/home/othman"
+    },
+    "verbose": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ConflictPolicy": {
+      "oneOf": [
+        {
+          "description": "Prompt on a TTY; abort when not a TTY.",
+          "type": "string",
+          "const": "prompt"
+        },
+        {
+          "description": "Abort the whole run; never change anything.",
+          "type": "string",
+          "const": "abort"
+        },
+        {
+          "description": "Leave the existing target in place.",
+          "type": "string",
+          "const": "skip"
+        },
+        {
+          "description": "Delete the target; symlink to the package's version.",
+          "type": "string",
+          "const": "overwrite"
+        },
+        {
+          "description": "Move the target's content into the package; symlink.",
+          "type": "string",
+          "const": "adopt"
+        }
+      ]
+    }
+  }
+}
