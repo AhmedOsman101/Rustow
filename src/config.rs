@@ -385,14 +385,12 @@ pub fn resolve(cli: &CliOverrides) -> Result<ResolvedConfig> {
         // 2a. env vars
         let env_dir = std::env::var_os(ENV_DIR).map(PathBuf::from);
         let env_target = std::env::var_os(ENV_TARGET).map(PathBuf::from);
-        let mut used_env = false;
         if let Some(d) = env_dir {
             source = Some(PathBuf::from(expand_tilde_and_vars(&d.to_string_lossy())));
-            used_env = true;
+            provenance = Provenance::Env;
         }
         if let Some(t) = env_target {
             target = PathBuf::from(expand_tilde_and_vars(&t.to_string_lossy()));
-            used_env = true;
         }
         // 2b. stowrc — only when still unresolved (env wins; file absent)
         if source.is_none() {
@@ -456,7 +454,7 @@ pub fn silence_provenance_at(path: &Path) -> std::io::Result<()> {
 }
 
 /// Permanently silence the provenance notice (best effort; warns on failure).
-pub fn silence_provenance() -> () {
+pub fn silence_provenance() {
     let stamp = provenance_stamp_path();
     if let Some(parent) = stamp.parent()
         && let Err(e) = fs::create_dir_all(parent).and_then(|_| fs::write(&stamp, b""))
