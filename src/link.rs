@@ -860,7 +860,11 @@ fn apply_link(src: &Path, dst: &Path) -> Result<()> {
   match fs::symlink_metadata(dst) {
     Ok(meta) => {
       if meta.file_type().is_symlink()
-        && fs::read_link(dst).ok().map(|r| absolutize(&r, parent_of(dst))).as_deref() == Some(src)
+        && fs::read_link(dst)
+          .ok()
+          .map(|r| absolutize(&r, parent_of(dst)))
+          .as_deref()
+          == Some(src)
       {
         return Ok(()); // already correct
       }
@@ -911,203 +915,231 @@ fn render_conflict_report(outcomes: &[(Conflict, PromptOutcome)]) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnlinkAction {
-    Unlink { dst: PathBuf },
+  Unlink { dst: PathBuf },
 }
 
 #[derive(Debug, Default)]
 pub struct UnlinkPlan {
-    pub actions: Vec<UnlinkAction>,
-    /// Real dirs traversed during the unlink walk — refold candidates (deepest first).
-    pub candidate_dirs: std::collections::HashSet<PathBuf>,
-    /// Informational: entries found on disk that were NOT ours (left alone).
-    pub foreign_skipped: Vec<PathBuf>,
+  pub actions: Vec<UnlinkAction>,
+  /// Real dirs traversed during the unlink walk — refold candidates (deepest first).
+  pub candidate_dirs: std::collections::HashSet<PathBuf>,
+  /// Informational: entries found on disk that were NOT ours (left alone).
+  pub foreign_skipped: Vec<PathBuf>,
 }
 
 /// Plan unlinking of `pkgs`: removes symlinks pointing into each package.
 /// Never touches anything not owned by a package. Refold of now link-only
 /// dirs happens at apply time (they are evaluated against the post-unlink
 /// filesystem).
-pub fn plan_unlink(source: &Path, target: &Path, pkgs: &[String], ignore: &Ignore) -> Result<UnlinkPlan> {
-    let mut plan = UnlinkPlan::default();
-    for pkg in pkgs {
-        let pkg_root = source.join(pkg);
-        if !pkg_root.is_dir() {
-            return Err(Error::PackageNotFound(pkg.clone()));
-        }
-        walk_unlink(source, target, &pkg_root, &pkg_root, Path::new(""), ignore, &mut plan)?;
+pub fn plan_unlink(
+  source: &Path,
+  target: &Path,
+  pkgs: &[String],
+  ignore: &Ignore,
+) -> Result<UnlinkPlan> {
+  let mut plan = UnlinkPlan::default();
+  for pkg in pkgs {
+    let pkg_root = source.join(pkg);
+    if !pkg_root.is_dir() {
+      return Err(Error::PackageNotFound(pkg.clone()));
     }
-    Ok(plan)
+    walk_unlink(
+      source,
+      target,
+      &pkg_root,
+      &pkg_root,
+      Path::new(""),
+      ignore,
+      &mut plan,
+    )?;
+  }
+  Ok(plan)
 }
 
 fn walk_unlink(
-    source: &Path,
-    target: &Path,
-    pkg_root: &Path,
-    subdir_abs: &Path,
-    subdir_rel: &Path,
-    ignore: &Ignore,
-    plan: &mut UnlinkPlan,
+  source: &Path,
+  target: &Path,
+  pkg_root: &Path,
+  subdir_abs: &Path,
+  subdir_rel: &Path,
+  ignore: &Ignore,
+  plan: &mut UnlinkPlan,
 ) -> Result<()> {
-    let children: Vec<PathBuf> = match fs::read_dir(subdir_abs) {
-        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
-        Err(_) => return Ok(()),
-    };
-    let mut children = children;
-    children.sort();
+  let children: Vec<PathBuf> = match fs::read_dir(subdir_abs) {
+    Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+    Err(_) => return Ok(()),
+  };
+  let mut children = children;
+  children.sort();
 
-    for child in children {
-        let name = match child.file_name() {
-            Some(n) => n,
-            None => continue,
-        };
-        let pkg_rel = subdir_rel.join(name);
-        if ignore.is_ignored(&pkg_rel) {
-            continue;
-        }
-        let dst = target.join(&pkg_rel);
-        let meta = fs::symlink_metadata(&dst).ok();
-        match (child.is_dir(), meta) {
-            (true, Some(m)) if m.file_type().is_symlink() => {
-                if link_points_into(&dst, pkg_root) {
-                    plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
-                    plan.candidate_dirs.insert(dst.parent().unwrap_or(target).to_path_buf());
-                } else {
-                    plan.foreign_skipped.push(dst);
-                }
-            }
-            (true, Some(m)) if m.is_dir() => {
-                plan.candidate_dirs.insert(dst.clone());
-                let child_abs = child.clone();
-                walk_unlink(source, target, pkg_root, &child_abs, &pkg_rel, ignore, plan)?;
-            }
-            (false, Some(m)) if m.file_type().is_symlink() => {
-                if link_points_into(&dst, pkg_root) {
-                    plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
-                    plan.candidate_dirs.insert(dst.parent().unwrap_or(target).to_path_buf());
-                } else {
-                    plan.foreign_skipped.push(dst);
-                }
-            }
-            _ => {}
-        }
+  for child in children {
+    let name = match child.file_name() {
+      Some(n) => n,
+      None => continue,
+    };
+    let pkg_rel = subdir_rel.join(name);
+    if ignore.is_ignored(&pkg_rel) {
+      continue;
     }
-    Ok(())
+    let dst = target.join(&pkg_rel);
+    let meta = fs::symlink_metadata(&dst).ok();
+    match (child.is_dir(), meta) {
+      (true, Some(m)) if m.file_type().is_symlink() => {
+        if link_points_into(&dst, pkg_root) {
+          plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
+          plan
+            .candidate_dirs
+            .insert(dst.parent().unwrap_or(target).to_path_buf());
+        } else {
+          plan.foreign_skipped.push(dst);
+        }
+      }
+      (true, Some(m)) if m.is_dir() => {
+        plan.candidate_dirs.insert(dst.clone());
+        let child_abs = child.clone();
+        walk_unlink(source, target, pkg_root, &child_abs, &pkg_rel, ignore, plan)?;
+      }
+      (false, Some(m)) if m.file_type().is_symlink() => {
+        if link_points_into(&dst, pkg_root) {
+          plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
+          plan
+            .candidate_dirs
+            .insert(dst.parent().unwrap_or(target).to_path_buf());
+        } else {
+          plan.foreign_skipped.push(dst);
+        }
+      }
+      _ => {}
+    }
+  }
+  Ok(())
 }
 
 fn link_points_into(dst: &Path, pkg_root: &Path) -> bool {
-    fs::read_link(dst)
-        .ok()
-        .map(|r| absolutize(&r, parent_of(dst)).starts_with(pkg_root))
-        .unwrap_or(false)
+  fs::read_link(dst)
+    .ok()
+    .map(|r| absolutize(&r, parent_of(dst)).starts_with(pkg_root))
+    .unwrap_or(false)
 }
 
 /// If `dir` is a real dir whose children are ALL symlinks resolving into one
 /// package's matching subtree (`source/<pkg>/<dir-rel>`), return that subtree.
 /// The target root itself is never refolded.
 pub fn refolded_dir(dir: &Path, target: &Path, source: &Path) -> Option<PathBuf> {
-    if dir == target || !dir.starts_with(target) {
-        return None;
+  if dir == target || !dir.starts_with(target) {
+    return None;
+  }
+  let rel = dir.strip_prefix(target).ok()?.to_path_buf();
+  if rel.as_os_str().is_empty() {
+    return None;
+  }
+  let meta = fs::symlink_metadata(dir).ok()?;
+  if !meta.is_dir() || meta.file_type().is_symlink() {
+    return None;
+  }
+  let children: Vec<PathBuf> = fs::read_dir(dir)
+    .ok()?
+    .flatten()
+    .map(|e| e.path())
+    .collect();
+  if children.is_empty() {
+    return None; // empty — handled by rmdir
+  }
+  let mut common: Option<PathBuf> = None;
+  for child in &children {
+    let meta = fs::symlink_metadata(child).ok()?;
+    if !meta.file_type().is_symlink() {
+      return None;
     }
-    let rel = dir.strip_prefix(target).ok()?.to_path_buf();
-    if rel.as_os_str().is_empty() {
-        return None;
+    let rl = resolve_symlink(child)?;
+    // package subtree corresponding to `dir`: the deepest ancestor of rl ending with rel
+    let pkg_dir = rl.ancestors().find(|a| a.ends_with(&rel))?.to_path_buf();
+    if !pkg_dir.starts_with(source) || !pkg_dir.is_dir() {
+      return None;
     }
-    let meta = fs::symlink_metadata(dir).ok()?;
-    if !meta.is_dir() || meta.file_type().is_symlink() {
-        return None;
+    match &common {
+      None => common = Some(pkg_dir),
+      Some(c) if *c == pkg_dir => {}
+      Some(_) => return None,
     }
-    let children: Vec<PathBuf> = fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
-    if children.is_empty() {
-        return None; // empty — handled by rmdir
-    }
-    let mut common: Option<PathBuf> = None;
-    for child in &children {
-        let meta = fs::symlink_metadata(child).ok()?;
-        if !meta.file_type().is_symlink() {
-            return None;
-        }
-        let rl = resolve_symlink(child)?;
-        // package subtree corresponding to `dir`: the deepest ancestor of rl ending with rel
-        let pkg_dir = rl.ancestors().find(|a| a.ends_with(&rel))?.to_path_buf();
-        if !pkg_dir.starts_with(source) || !pkg_dir.is_dir() {
-            return None;
-        }
-        match &common {
-            None => common = Some(pkg_dir),
-            Some(c) if *c == pkg_dir => {}
-            Some(_) => return None,
-        }
-    }
-    common
+  }
+  common
 }
 
 fn try_refold(dir: &Path, target: &Path, source: &Path) -> Result<bool> {
-    let Some(package_dir) = refolded_dir(dir, target, source) else {
-        return Ok(false);
-    };
-    for child in fs::read_dir(dir).map_err(Error::io(dir))?.flatten() {
-        let p = child.path();
-        if p.is_symlink() {
-            fs::remove_file(&p).map_err(Error::io(&p))?;
-        } else {
-            // foreign file appeared — don't touch
-            return Ok(false);
-        }
+  let Some(package_dir) = refolded_dir(dir, target, source) else {
+    return Ok(false);
+  };
+  for child in fs::read_dir(dir).map_err(Error::io(dir))?.flatten() {
+    let p = child.path();
+    if p.is_symlink() {
+      fs::remove_file(&p).map_err(Error::io(&p))?;
+    } else {
+      // foreign file appeared — don't touch
+      return Ok(false);
     }
-    fs::remove_dir(dir).map_err(Error::io(dir))?;
-    std::os::unix::fs::symlink(&package_dir, dir).map_err(Error::io(dir))?;
-    Ok(true)
+  }
+  fs::remove_dir(dir).map_err(Error::io(dir))?;
+  std::os::unix::fs::symlink(&package_dir, dir).map_err(Error::io(dir))?;
+  Ok(true)
 }
 
 /// Apply an unlink plan: remove links, re-fold link-only dirs (post-unlink
 /// filesystem), and remove dirs that became empty. Never the target root.
 /// Returns the number of links removed (excluding refolds).
-pub fn apply_unlink(plan: &UnlinkPlan, target: &Path, source: &Path, dry_run: bool) -> Result<usize> {
-    let mut removed = 0usize;
+pub fn apply_unlink(
+  plan: &UnlinkPlan,
+  target: &Path,
+  source: &Path,
+  dry_run: bool,
+) -> Result<usize> {
+  let mut removed = 0usize;
 
-    if dry_run {
-        return Ok(plan.actions.len());
+  if dry_run {
+    return Ok(plan.actions.len());
+  }
+
+  for action in &plan.actions {
+    let UnlinkAction::Unlink { dst } = action;
+    if dst.is_symlink() {
+      fs::remove_file(dst).map_err(Error::io(dst))?;
     }
+    removed += 1;
+  }
 
-    for action in &plan.actions {
-        let UnlinkAction::Unlink { dst } = action;
-        if dst.is_symlink() {
-            fs::remove_file(dst).map_err(Error::io(dst))?;
-        }
-        removed += 1;
-    }
+  // re-fold link-only dirs, deepest first; a refold can make a parent foldable too
+  let mut dirs: Vec<PathBuf> = plan.candidate_dirs.iter().cloned().collect();
+  dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+  for dir in &dirs {
+    try_refold(dir, target, source)?;
+  }
 
-    // re-fold link-only dirs, deepest first; a refold can make a parent foldable too
-    let mut dirs: Vec<PathBuf> = plan.candidate_dirs.iter().cloned().collect();
-    dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
-    for dir in &dirs {
-        try_refold(dir, target, source)?;
-    }
+  // remove dirs that became empty (walk deepest candidates + their parents)
+  let mut seen = std::collections::HashSet::new();
+  for dir in &dirs {
+    try_rmdir_up(dir, target, &mut seen);
+  }
 
-    // remove dirs that became empty (walk deepest candidates + their parents)
-    let mut seen = std::collections::HashSet::new();
-    for dir in &dirs {
-        try_rmdir_up(dir, target, &mut seen);
-    }
-
-    Ok(removed)
+  Ok(removed)
 }
 
 fn try_rmdir_up(dir: &Path, target: &Path, seen: &mut std::collections::HashSet<PathBuf>) {
-    let mut current = Some(dir.to_path_buf());
-    while let Some(d) = current {
-        if d == *target || !d.starts_with(target) {
-            break;
-        }
-        if !seen.insert(d.clone()) {
-            break;
-        }
-        let empty = fs::read_dir(&d).map(|mut r| r.next().is_none()).unwrap_or(false);
-        if empty {
-            let _ = fs::remove_dir(&d);
-            current = d.parent().map(|p| p.to_path_buf());
-        } else {
-            break;
-        }
+  let mut current = Some(dir.to_path_buf());
+  while let Some(d) = current {
+    if d == *target || !d.starts_with(target) {
+      break;
     }
+    if !seen.insert(d.clone()) {
+      break;
+    }
+    let empty = fs::read_dir(&d)
+      .map(|mut r| r.next().is_none())
+      .unwrap_or(false);
+    if empty {
+      let _ = fs::remove_dir(&d);
+      current = d.parent().map(|p| p.to_path_buf());
+    } else {
+      break;
+    }
+  }
 }
