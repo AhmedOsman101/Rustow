@@ -44,7 +44,12 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings
 
 ~~~sh
 eval "argv=(${files})"
-rustfmt --config-path rustfmt.toml "${argv[@]}"
+
+if ((${#argv[@]} == 0)); then
+  cargo fmt
+else
+  rustfmt --config-path rustfmt.toml "${argv[@]}"
+fi
 ~~~
 
 ## clean
