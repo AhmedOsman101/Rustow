@@ -18,6 +18,18 @@ cargo build
 cargo test
 ~~~
 
+## format [files]
+
+> Format code (cargo fmt, or rustfmt on specific files)
+
+~~~sh
+if [ -n "$files" ]; then
+  rustfmt --edition 2024 "$files"
+else
+  cargo fmt
+fi
+~~~
+
 ## lint
 
 > Check formatting and lints
