@@ -26,11 +26,12 @@ cargo test
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ~~~
 
-## format
+## format [args]
 
 > Format the project
 
 ~~~sh
+eval
 rustfmt --config-path rustfmt.toml
 ~~~
 

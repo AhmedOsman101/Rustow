@@ -1,6 +1,5 @@
 //! Planner tests: tempdir fixtures, fake $HOME target, real package tree.
 
-use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -251,7 +250,6 @@ fn unfold_restores_both_packages() {
   );
 }
 
-#[test]
 #[test]
 fn file_vs_existing_real_dir_conflicts() {
   let f = fixture();
