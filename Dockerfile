@@ -25,3 +25,5 @@ RUN groupadd -g "${USER_GID}" testuser && \
 USER testuser
 ENV CARGO_HOME=/home/testuser/.cargo
 WORKDIR /app
+
+CMD ["bash"]

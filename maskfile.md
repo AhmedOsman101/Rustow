@@ -93,16 +93,31 @@ cargo run --quiet --example generate_schema -- --check
 > Build the container
 
 ~~~bash
-podman build -t rustow-e2e -f Dockerfile .
+podman build \
+  --build-arg USER_UID="$(id -u)" \
+  --build-arg USER_GID="$(id -g)" \
+  -t rustow-e2e \
+  -f Dockerfile .
 ~~~
 
-### run [args]
+### run (command)
 
 > Run a command on the container
 
+**OPTIONS**
+
+- interactive
+  - flags: -i --interactive
+  - type: boolean
+  - desc: Make STDIN available to the contained process and allocate a pseudo-TTY for container
+
 ~~~bash
-eval "argv=(${args[@]})"
-podman run --rm -v "$PWD:/app" -w /app rustow-e2e -- "${argv[@]}"
+podman run --rm ${interactive:+'-it'} \
+  --userns=keep-id \
+  -v "$(pwd):/app" \
+  -w /app \
+  rustow-e2e \
+  bash -c "${command}"
 ~~~
 
 ## e2e
