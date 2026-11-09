@@ -34,7 +34,7 @@ for file in "${files[@]}"; do
 done
 
 # --- Formats only the staged files --- #
-mask format "${files[@]}"
+mask format "${files[*]}"
 
 # Compare old diffs with new diffs to find changed files
 formatted_files=()
