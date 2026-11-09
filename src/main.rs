@@ -1,3 +1,3 @@
 fn main() {
-  println!("Hello, world!");
+    println!("rustow 0.1.0");
 }
