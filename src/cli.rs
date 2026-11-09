@@ -88,6 +88,19 @@ pub enum Commands {
     #[arg(required = true, value_name = "PACKAGE")]
     pkgs: Vec<String>,
   },
+
+  /// Show link health of packages.
+  Status {
+    /// Packages to inspect (default: all packages).
+    #[arg(value_name = "PACKAGE")]
+    pkgs: Vec<String>,
+    /// Print only the summary line.
+    #[arg(short, long)]
+    short: bool,
+    /// Print machine-readable JSON.
+    #[arg(long)]
+    json: bool,
+  },
 }
 
 #[derive(Debug, Subcommand)]
@@ -336,6 +349,30 @@ pub fn run(cli: Cli) -> Result<i32> {
       // unlink first (never conflicts), then link
       let _ = app.unlink_pkgs(&pkgs)?;
       app.link_pkgs(&pkgs)
+    }
+    Commands::Status { pkgs, short, json } => {
+      let app = App::new(&cli.global)?;
+      let ignore = app.ignore()?;
+      let pkgs = if pkgs.is_empty() {
+        list_packages(app.source())?
+      } else {
+        pkgs
+      };
+      let packages = crate::status::compute_many(app.source(), app.target(), &pkgs, &ignore)?;
+      let code = crate::status::exit_code(&packages);
+      if short {
+        println!(
+          "{}",
+          crate::status::render_short(&crate::status::summarize(&packages))
+        );
+      } else if json {
+        println!("{}", crate::status::render_json(&packages)?);
+      } else {
+        use std::io::IsTerminal;
+        let no_color = !std::io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some();
+        println!("{}", crate::status::render_table(&packages, no_color));
+      }
+      Ok(code)
     }
   }
 }

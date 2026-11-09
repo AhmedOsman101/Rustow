@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+echo "Running pre-commit checks..."
+cargo fmt --check || exit 1
+cargo test --quiet || exit 1
+echo "✓ Pre-commit checks passed"
