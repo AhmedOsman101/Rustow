@@ -38,6 +38,14 @@ pub struct GlobalArgs {
     /// Verbose output.
     #[arg(short, long, global = true)]
     pub verbose: bool,
+
+    /// Stow directory (source of packages); overrides config/env/stowrc.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+
+    /// Link destination root; overrides config/env/stowrc.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub target: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

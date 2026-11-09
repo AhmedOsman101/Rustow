@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("{0}")]
     Message(String),
+
+    #[error("aborted by user")]
+    Aborted,
 }
 
 impl Error {
