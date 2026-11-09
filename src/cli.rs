@@ -82,6 +82,29 @@ pub enum Commands {
   /// Unlink all packages in the source directory.
   Reset,
 
+  /// Create a new package (alias: add).
+  #[command(alias = "add")]
+  Create {
+    /// Package name, e.g. "vim".
+    #[arg(value_name = "APP")]
+    app: String,
+    /// Package/target-relative destination path (default: .config/<app>).
+    #[arg(long, value_name = "PATH")]
+    path: Option<String>,
+    /// Prompt before linking the package.
+    #[arg(short, long)]
+    interactive: bool,
+    /// Create an empty package only; populate it yourself.
+    #[arg(long)]
+    empty: bool,
+    /// Take the source from a custom path instead of $TARGET/<path>.
+    #[arg(long, value_name = "SRC")]
+    source: Option<PathBuf>,
+    /// Skip confirmations.
+    #[arg(long)]
+    yes: bool,
+  },
+
   /// Unlink then re-link packages (restow).
   Relink {
     /// Packages to relink.
@@ -384,6 +407,35 @@ pub fn run(cli: Cli) -> Result<i32> {
       // unlink first (never conflicts), then link
       let _ = app.unlink_pkgs(&pkgs)?;
       app.link_pkgs(&pkgs)
+    }
+    Commands::Create {
+      app,
+      path,
+      interactive,
+      empty,
+      source,
+      yes,
+    } => {
+      let app_state = App::new(&cli.global)?;
+      let mut ctx = crate::create::CreateContext {
+        source_dir: app_state.source().to_path_buf(),
+        target: app_state.target().to_path_buf(),
+        dry_run: cli.global.dry_run,
+        fold: app_state.resolved.cfg.fold,
+        ignore_globs: app_state.resolved.cfg.ignore.clone(),
+        conflict_resolver: app_state.make_resolver(),
+      };
+      let opts = crate::create::CreateOptions {
+        app,
+        path,
+        verbose: app_state.resolved.cfg.verbose || cli.global.verbose,
+        interactive,
+        empty,
+        source,
+        yes,
+      };
+      crate::create::plan_create(&mut ctx, &opts)?;
+      Ok(0)
     }
     Commands::Status { pkgs, short, json } => {
       let app = App::new(&cli.global)?;
