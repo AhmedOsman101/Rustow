@@ -177,7 +177,9 @@ impl<'a> App<'a> {
       ConflictPolicy::Adopt => Box::new(FixedResolver(ConflictResolution::Adopt)),
       ConflictPolicy::Prompt => {
         if std::io::stdin().is_terminal() {
-          Box::new(PromptResolver)
+          Box::new(PromptResolver {
+            diff_tool: self.resolved.cfg.diff_tool.clone(),
+          })
         } else {
           Box::new(AbortResolver)
         }
@@ -209,6 +211,9 @@ impl<'a> App<'a> {
               println!("{}", render_action(action));
             }
           }
+        }
+        for warning in &out.warnings {
+          eprintln!("warning: {warning}");
         }
         let verb = if out.dry_run { "would link" } else { "linked" };
         println!(
@@ -270,9 +275,11 @@ fn render_action(action: &link::Action) -> String {
   }
 }
 
-/// Interactive per-conflict prompt (TTY). The merge choice lands with the
-/// diff-tool work; until then files offer skip/overwrite/adopt/abort.
-struct PromptResolver;
+/// Interactive per-conflict prompt (TTY). File conflicts offer merge via the
+/// configured/detected diff tool; everything else offers overwrite/skip/abort.
+struct PromptResolver {
+  diff_tool: Option<String>,
+}
 
 impl ConflictResolver for PromptResolver {
   fn resolve(&mut self, conflict: &link::Conflict) -> Result<PromptOutcome> {
@@ -283,24 +290,52 @@ impl ConflictResolver for PromptResolver {
       return Ok(PromptOutcome::Abort);
     }
     eprintln!("conflict: {conflict}");
-    let items = [
-      "skip (leave it as it is)",
-      "overwrite (replace it with the package's version)",
-      "adopt (move it into the package, then link)",
-      "abort everything",
-    ];
+    let is_regular_file = std::fs::symlink_metadata(&conflict.dst)
+      .map(|m| m.file_type().is_file())
+      .unwrap_or(false);
+    let items: Vec<&str> = if is_regular_file {
+      vec![
+        "merge (open the diff tool; reconcile into the package file)",
+        "overwrite (replace it with the package's version)",
+        "skip (leave it as it is)",
+        "abort everything",
+      ]
+    } else {
+      vec![
+        "overwrite (replace it with the package's version)",
+        "skip (leave it as it is)",
+        "abort everything",
+      ]
+    };
     let choice = Select::new()
       .with_prompt("what would you like to do?")
       .items(&items)
       .default(0)
       .interact()
       .map_err(|e| Error::Message(format!("prompt failed: {e}")))?;
-    Ok(match choice {
-      0 => PromptOutcome::Skip,
-      1 => PromptOutcome::Overwrite,
-      2 => PromptOutcome::Adopt,
-      _ => PromptOutcome::Abort,
-    })
+    if is_regular_file {
+      match choice {
+        0 => {
+          let cfg_tool = self.diff_tool.as_deref();
+          let chosen = crate::diff::choose_tool(cfg_tool, true)?;
+          let package_file = conflict
+            .src
+            .clone()
+            .ok_or_else(|| Error::Message("merge: conflict has no package source".to_string()))?;
+          crate::diff::run_merge(&chosen, &conflict.dst, &package_file)?;
+          Ok(PromptOutcome::Merge)
+        }
+        1 => Ok(PromptOutcome::Overwrite),
+        2 => Ok(PromptOutcome::Skip),
+        _ => Ok(PromptOutcome::Abort),
+      }
+    } else {
+      Ok(match choice {
+        0 => PromptOutcome::Overwrite,
+        1 => PromptOutcome::Skip,
+        _ => PromptOutcome::Abort,
+      })
+    }
   }
 }
 

@@ -26,13 +26,13 @@ cargo test
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ~~~
 
-## format [args]
+## format [files]
 
 > Format the project
 
 ~~~sh
-eval
-rustfmt --config-path rustfmt.toml
+eval "argv=(${files})"
+rustfmt --config-path rustfmt.toml "${argv[@]}"
 ~~~
 
 ## clean

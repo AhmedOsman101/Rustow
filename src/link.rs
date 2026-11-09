@@ -726,6 +726,7 @@ pub struct ApplyOutcome {
   pub repaired: usize,
   pub skipped: usize,
   pub dry_run: bool,
+  pub warnings: Vec<String>,
 }
 
 /// Apply link plans. All conflicts are resolved via `resolver` (or skipped
@@ -789,6 +790,7 @@ pub fn apply_plans(
     dry_run,
     ..ApplyOutcome::default()
   };
+  let mut out_warnings: Vec<String> = Vec::new();
   if dry_run {
     // count without touching the fs
     for a in &actions {
@@ -803,7 +805,20 @@ pub fn apply_plans(
   }
 
   // 3. adopt/overwrite fixups before linking
+  let mut drop_actions: HashSet<PathBuf> = HashSet::new();
   for (target, src) in &adopted {
+    let is_regular_file = fs::symlink_metadata(target)
+      .map(|m| m.file_type().is_file())
+      .unwrap_or(false);
+    if !is_regular_file {
+      out_warnings.push(format!(
+        "cannot adopt {}: not a regular file — left in place",
+        target.display()
+      ));
+      skip_dsts.insert(target.clone());
+      drop_actions.insert(target.clone());
+      continue;
+    }
     if let Some(parent) = src.parent() {
       fs::create_dir_all(parent).map_err(Error::io(parent))?;
     }
@@ -817,8 +832,12 @@ pub fn apply_plans(
     }
   }
 
-  // 4. execute actions in order
-  for action in &actions {
+  // 4. execute actions in order (skipping adopts that were rejected)
+  for action in actions.into_iter().filter(|a| match a {
+    Action::Link { dst, .. } => !drop_actions.contains(dst),
+    _ => true,
+  }) {
+    let action = &action;
     match action {
       Action::Mkdir { dst } => {
         fs::create_dir_all(dst).map_err(Error::io(dst))?;
@@ -850,6 +869,7 @@ pub fn apply_plans(
     }
   }
   out.skipped = skip_dsts.len();
+  out.warnings = out_warnings;
   Ok(out)
 }
 

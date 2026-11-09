@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod diff;
 pub mod error;
 pub mod ignore;
 pub mod link;
