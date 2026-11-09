@@ -26,6 +26,14 @@ cargo test
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 ~~~
 
+## format
+
+> Format the project
+
+~~~sh
+rustfmt --config-path rustfmt.toml
+~~~
+
 ## clean
 
 > Clean build artifacts
@@ -50,7 +58,7 @@ cargo install --path .
 cargo run --quiet --example generate_schema
 ~~~
 
-## schema-check
+### check
 
 > Verify schema.json is up to date with the Config struct
 
