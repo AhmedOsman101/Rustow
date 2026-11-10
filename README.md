@@ -160,4 +160,4 @@ mask schema       # regenerate schema.json
 mask install      # cargo install --path .
 ```
 
-License: MIT (see [LICENSE](./LICENSE)).
+License: GPL-2.0-or-later (see [LICENSE](./LICENSE)).

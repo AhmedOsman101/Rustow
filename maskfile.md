@@ -6,43 +6,43 @@ All commands assume repo root as cwd. Use `$MASK` in scripts that chain other ma
 
 > Build the debug binary
 
-~~~sh
+```sh
 cargo build
-~~~
+```
 
 ## test
 
 > Run all tests
 
-~~~sh
+```sh
 cargo test
-~~~
+```
 
 ## format [files]
 
 > Format code (cargo fmt, or rustfmt on specific files)
 
-~~~sh
+```sh
 if [ -n "$files" ]; then
   rustfmt --edition 2024 "$files"
 else
   cargo fmt
 fi
-~~~
+```
 
 ## lint
 
 > Check formatting and lints
 
-~~~sh
+```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
-~~~
+```
 
 ## format [files]
 
 > Format the project
 
-~~~sh
+```sh
 eval "argv=(${files})"
 
 if ((${#argv[@]} == 0)); then
@@ -50,39 +50,39 @@ if ((${#argv[@]} == 0)); then
 else
   rustfmt --config-path rustfmt.toml "${argv[@]}"
 fi
-~~~
+```
 
 ## clean
 
 > Clean build artifacts
 
-~~~sh
+```sh
 cargo clean
-~~~
+```
 
 ## install
 
 > Install rustow into PATH (~/.cargo/bin)
 
-~~~sh
+```sh
 cargo install --path .
-~~~
+```
 
 ## schema
 
 > Regenerate schema.json at the repo root from the Config struct
 
-~~~sh
+```sh
 cargo run --quiet --example generate_schema
-~~~
+```
 
 ### check
 
 > Verify schema.json is up to date with the Config struct
 
-~~~sh
+```sh
 cargo run --quiet --example generate_schema -- --check
-~~~
+```
 
 ## container
 
@@ -92,13 +92,13 @@ cargo run --quiet --example generate_schema -- --check
 
 > Build the container
 
-~~~bash
+```bash
 podman build \
   --build-arg USER_UID="$(id -u)" \
   --build-arg USER_GID="$(id -g)" \
   -t rustow-e2e \
   -f Dockerfile .
-~~~
+```
 
 ### run (command)
 
@@ -111,28 +111,28 @@ podman build \
   - type: boolean
   - desc: Make STDIN available to the contained process and allocate a pseudo-TTY for container
 
-~~~bash
+```bash
 podman run --rm ${interactive:+'-it'} \
   --userns=keep-id \
   -v "$(pwd):/app" \
   -w /app \
   rustow-e2e \
   bash -c "${command}"
-~~~
+```
 
 ## e2e
 
 > Run the end-to-end scenario in a Void Linux podman container
 
-~~~sh
+```sh
 $MASK container build
 $MASK container run "bash tests/e2e.sh"
-~~~
+```
 
 ## check
 
 > Run lint + tests
 
-~~~sh
+```sh
 $MASK lint && $MASK test
-~~~
+```

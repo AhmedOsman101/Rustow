@@ -2,9 +2,9 @@
 name = "rustow"
 version = "0.1.0"
 edition = "2024"
-description = "A Stow-compatible dotfiles linker written in Rust, with Tuckr-style status UX"
-license = "MIT"
-repository = ""
+description = "A Stow-compatible dotfiles linker written in Rust, with modern UX"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/AhmedOsman101/Rustow"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
