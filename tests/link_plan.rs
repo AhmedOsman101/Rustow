@@ -413,3 +413,30 @@ fn missing_package_errors() {
   .unwrap_err();
   assert!(err.to_string().contains("ghost"));
 }
+
+#[test]
+fn fold_blocked_when_subtree_contains_ignored_paths() {
+  let f = fixture();
+  // .git inside a foldable dir — the package dir must NOT be folded;
+  // per-file links are created and .git is skipped entirely
+  write_file(&f.source.join("eza"), ".config/eza/theme.yml", "theme");
+  write_file(&f.source.join("eza"), ".config/eza/.git/HEAD", "ref");
+  fs::create_dir_all(f.target.join(".config")).unwrap();
+  let plans = link_all(&f, &["eza"]);
+  assert!(plans[0].conflicts.is_empty());
+  assert!(
+    !plans[0]
+      .actions
+      .iter()
+      .any(|a| matches!(a, Action::Fold { dst, .. } if dst == &f.target.join(".config/eza")))
+  );
+  assert!(plans[0].actions.iter().any(
+    |a| matches!(a, Action::Link { dst, .. } if dst == &f.target.join(".config/eza/theme.yml"))
+  ));
+  assert!(
+    !plans[0]
+      .actions
+      .iter()
+      .any(|a| matches!(a, Action::Link { dst, .. } if dst.to_string_lossy().contains(".git")))
+  );
+}

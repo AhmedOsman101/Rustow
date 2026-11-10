@@ -433,6 +433,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         empty,
         source,
         yes,
+        force: cli.global.force,
       };
       crate::create::plan_create(&mut ctx, &opts)?;
       Ok(0)

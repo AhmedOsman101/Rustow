@@ -18,6 +18,8 @@ pub struct CreateOptions {
   pub empty: bool,
   pub source: Option<PathBuf>,
   pub yes: bool,
+  /// -f/--force from the global flags: overwrite colliding package files.
+  pub force: bool,
 }
 
 pub struct CreateContext {
@@ -132,6 +134,120 @@ fn move_path(src: &Path, dst: &Path) -> Result<()> {
   }
 }
 
+/// One file's move from source tree into the package, with collision info.
+struct MoveItem {
+  from: PathBuf,
+  to: PathBuf,
+  is_dir: bool,
+}
+
+/// Collect the full move plan for merging `src` (file or dir) into `dst` which may exist (dir only).
+/// Returns the plan and a list of collisions (dst occupied by something incompatible).
+fn collect_move(src: &Path, dst: &Path) -> Result<(Vec<MoveItem>, Vec<PathBuf>)> {
+  let mut items = Vec::new();
+  let mut collisions = Vec::new();
+
+  if !src.is_dir() {
+    // src is a file or symlink — single move (or overwrite under -f)
+    if dst.exists() || dst.is_symlink() {
+      collisions.push(dst.to_path_buf());
+      items.push(MoveItem {
+        from: src.to_path_buf(),
+        to: dst.to_path_buf(),
+        is_dir: false,
+      });
+    } else {
+      items.push(MoveItem {
+        from: src.to_path_buf(),
+        to: dst.to_path_buf(),
+        is_dir: false,
+      });
+    }
+    return Ok((items, collisions));
+  }
+
+  // src is a directory
+  for entry in walkdir::WalkDir::new(src).follow_links(false) {
+    let entry = entry.map_err(|e| Error::Message(e.to_string()))?;
+    if entry.path() == src {
+      // top-level dir itself
+      if dst.exists() || dst.is_symlink() {
+        if dst.is_dir() {
+          continue; // merge into it
+        }
+        collisions.push(dst.to_path_buf());
+      }
+      continue;
+    }
+    let rel = entry.path().strip_prefix(src).unwrap();
+    let to = dst.join(rel);
+    if entry.file_type().is_dir() {
+      // dir collision only when dst path is a non-directory
+      if to.is_file() || to.is_symlink() {
+        collisions.push(to.clone());
+      }
+      items.push(MoveItem {
+        from: entry.path().to_path_buf(),
+        to,
+        is_dir: true,
+      });
+    } else {
+      // file collision (package file vs incoming file): always include in the plan;
+      // without -f the caller aborts before anything is moved
+      if to.exists() || to.is_symlink() {
+        collisions.push(to.clone());
+      }
+      items.push(MoveItem {
+        from: entry.path().to_path_buf(),
+        to,
+        is_dir: false,
+      });
+    }
+  }
+  Ok((items, collisions))
+}
+
+/// Execute a move plan (src tree into possibly-existing dst dir), file by file.
+/// `force` allows overwriting colliding package files.
+fn execute_move(items: &[MoveItem], force: bool, src_root: &Path) -> Result<()> {
+  // create package dirs first (deepest ordering comes free from sorted walk)
+  let mut items_sorted: Vec<&MoveItem> = items.iter().collect();
+  items_sorted.sort_by_key(|i| i.from.components().count());
+
+  for item in &items_sorted {
+    if item.is_dir {
+      fs::create_dir_all(&item.to).map_err(Error::io(&item.to))?;
+      continue;
+    }
+    if item.to.exists() || item.to.is_symlink() {
+      if !force {
+        return Err(Error::Message(format!(
+          "refusing to overwrite {}",
+          item.to.display()
+        )));
+      }
+      if item.to.is_dir() && !item.to.is_symlink() {
+        fs::remove_dir_all(&item.to).map_err(Error::io(&item.to))?;
+      } else {
+        fs::remove_file(&item.to).map_err(Error::io(&item.to))?;
+      }
+    }
+    if let Some(parent) = item.to.parent() {
+      fs::create_dir_all(parent).map_err(Error::io(parent))?;
+    }
+    match fs::rename(&item.from, &item.to) {
+      Ok(()) => {}
+      Err(_) => {
+        fs::copy(&item.from, &item.to).map_err(Error::io(&item.to))?;
+        fs::remove_file(&item.from).map_err(Error::io(&item.from))?;
+      }
+    }
+  }
+  // clean up any empty source tree left behind
+  let _ = fs::remove_dir_all(src_root);
+  Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
   fs::create_dir_all(dst).map_err(Error::io(dst))?;
   for entry in fs::read_dir(src).map_err(Error::io(src))?.flatten() {
@@ -162,36 +278,6 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
   let dst = dst_for(ctx, app, relpath);
   let src = src_for(ctx, app, relpath, opts.source.as_deref());
 
-  // 1. package already exists → never clobber, offer link
-  if pkg.exists() {
-    eprintln!("package already exists at {}", pkg.display());
-    print_pkg_summary(&pkg, opts.verbose)?;
-    if opts.yes {
-      // --yes accepts linking the existing package; moving is not implied
-      return link_existing(ctx, app);
-    }
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
-      return Err(Error::Message(format!(
-        "package {} already exists — use `rustow link {app}` to link it, or --yes to confirm linking",
-        pkg.display()
-      )));
-    }
-    let link_it = dialoguer::Confirm::new()
-      .with_prompt("link the existing package?")
-      .default(true)
-      .interact()
-      .map_err(|e| Error::Message(format!("prompt failed: {e}")))?;
-    if link_it {
-      return link_existing(ctx, app);
-    }
-    return Ok(CreateOutcome {
-      created_package: false,
-      moved: None,
-      linked: false,
-    });
-  }
-
   // both flags → error
   if opts.empty && opts.source.is_some() {
     return Err(Error::Message(
@@ -199,8 +285,15 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
     ));
   }
 
-  // 2. --empty → create bare package, stop
+  // --empty → create bare package, stop
   if opts.empty {
+    if pkg.exists() {
+      eprintln!("package already exists at {}", pkg.display());
+      return Err(Error::Message(format!(
+        "package {} already exists",
+        pkg.display()
+      )));
+    }
     if ctx.dry_run {
       println!("would create empty package {}", pkg.display());
     } else {
@@ -215,13 +308,28 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
     });
   }
 
-  // 3. source exists → move it in
+  // source exists (pkg may or may not exist) → move/merge into the package
   if src.exists() {
-    if dst.exists() {
-      return Err(Error::Message(format!(
-        "destination {} already exists — refusing to overwrite",
-        dst.display()
-      )));
+    let (items, collisions) = collect_move(&src, &dst)?;
+    if !collisions.is_empty() {
+      if !opts.force {
+        let report = collisions
+          .iter()
+          .map(|c| format!("  {}", c.display()))
+          .collect::<Vec<_>>()
+          .join("\n");
+        return Err(Error::Conflicts(format!(
+          "rustow: destination files already exist in the package — nothing was moved:\n{report}\nuse -f/--force to overwrite them"
+        )));
+      }
+      eprintln!(
+        "warning: overwriting {} existing file(s) in the package (-f)",
+        collisions.len()
+      );
+    }
+    if items.is_empty() && collisions.is_empty() {
+      eprintln!("nothing to move from {}", src.display());
+      return maybe_link(ctx, opts, app, None);
     }
     let files = list_files(&src)?;
     let total = total_bytes(&files);
@@ -252,10 +360,45 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
         linked: false,
       });
     }
-    move_path(&src, &dst)?;
+    if !dst.exists() {
+      // fast path: single rename
+      move_path(&src, &dst)?;
+    } else {
+      // merge: src dir into existing dst dir
+      execute_move(&items, opts.force, &src)?;
+    }
     eprintln!("moved {} -> {}", src.display(), dst.display());
     // default: link right away; -i asks first
     return maybe_link(ctx, opts, app, Some((src, dst)));
+  }
+
+  // package exists, no source → link it (or abort)
+  if pkg.exists() {
+    eprintln!("package already exists at {}", pkg.display());
+    print_pkg_summary(&pkg, opts.verbose)?;
+    if opts.yes {
+      return link_existing(ctx, app);
+    }
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+      return Err(Error::Message(format!(
+        "package {} already exists — use `rustow link {app}` to link it, or --yes to confirm linking",
+        pkg.display()
+      )));
+    }
+    let link_it = dialoguer::Confirm::new()
+      .with_prompt("link the existing package?")
+      .default(true)
+      .interact()
+      .map_err(|e| Error::Message(format!("prompt failed: {e}")))?;
+    if link_it {
+      return link_existing(ctx, app);
+    }
+    return Ok(CreateOutcome {
+      created_package: false,
+      moved: None,
+      linked: false,
+    });
   }
 
   // 4. source missing

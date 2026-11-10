@@ -281,6 +281,27 @@ impl<'a> Planner<'a> {
     }
   }
 
+  /// A directory folds only over a subtree free of ignored paths (e.g. nested
+  /// .git); otherwise we descend and link per-file so ignored data is never
+  /// exposed through a symlink.
+  fn clean_subtree(&self, src_dir: &Path, pkg_rel: &Path) -> bool {
+    for item in WalkDir::new(src_dir)
+      .follow_links(false)
+      .into_iter()
+      .flatten()
+    {
+      let rel = match item.path().strip_prefix(src_dir) {
+        Ok(p) if p.as_os_str().is_empty() => continue,
+        Ok(p) => pkg_rel.join(p),
+        Err(_) => continue,
+      };
+      if self.ignore.is_ignored(&rel) {
+        return false;
+      }
+    }
+    true
+  }
+
   fn plan_dir(&mut self, src_dir: &Path, pkg_rel: &Path, dst: &Path) {
     match self.probe(dst) {
       Probe::Missing => {
@@ -288,6 +309,7 @@ impl<'a> Planner<'a> {
           && !self.block_fold.contains(dst)
           && !self.claimed.contains(dst)
           && self.has_contents(src_dir)
+          && self.clean_subtree(src_dir, pkg_rel)
         {
           self.actions.push(Action::Fold {
             src_dir: src_dir.to_path_buf(),
@@ -413,6 +435,7 @@ impl<'a> Planner<'a> {
             && !self.own_dir_claims.contains(&child_dst)
             && !self.claimed.contains(&child_dst)
             && self.has_contents(&child_abs)
+            && self.clean_subtree(&child_abs, &full_pkg_rel)
           {
             self.actions.push(Action::Fold {
               src_dir: child_abs,

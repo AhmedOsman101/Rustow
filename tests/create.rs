@@ -232,3 +232,94 @@ fn create_verbose_shows_files() {
   assert!(stderr.contains("a.vim"));
   assert!(stderr.contains("b.vim"));
 }
+
+#[test]
+fn create_merges_source_into_existing_empty_package() {
+  let r = rig();
+  fs::create_dir_all(r.source.join("mytool")).unwrap(); // pre-existing empty package
+  write_file(&r.target, ".config/mytool/settings.conf", "key = value");
+  r.cmd()
+    .args(["create", "mytool", "--yes"])
+    .assert()
+    .success();
+  // linked after merge (folded dir symlink or individual file link)
+  assert!(
+    r.target.join(".config/mytool").is_symlink()
+      || r.target.join(".config/mytool/settings.conf").is_symlink()
+  );
+  assert_eq!(
+    fs::read_to_string(r.source.join("mytool/.config/mytool/settings.conf")).unwrap(),
+    "key = value"
+  );
+}
+
+#[test]
+fn create_merge_collision_aborts_nothing_moved() {
+  let r = rig();
+  fs::create_dir_all(r.source.join("mytool/.config/mytool")).unwrap();
+  fs::write(
+    r.source.join("mytool/.config/mytool/settings.conf"),
+    "packaged",
+  )
+  .unwrap();
+  write_file(&r.target, ".config/mytool/settings.conf", "from target");
+  r.cmd()
+    .args(["create", "mytool", "--yes"])
+    .assert()
+    .failure();
+  // both versions untouched
+  assert_eq!(
+    fs::read_to_string(r.source.join("mytool/.config/mytool/settings.conf")).unwrap(),
+    "packaged"
+  );
+  assert_eq!(
+    fs::read_to_string(r.target.join(".config/mytool/settings.conf")).unwrap(),
+    "from target"
+  );
+}
+
+#[test]
+fn create_merge_collision_force_overwrites_package_file() {
+  let r = rig();
+  fs::create_dir_all(r.source.join("mytool/.config/mytool")).unwrap();
+  fs::write(
+    r.source.join("mytool/.config/mytool/settings.conf"),
+    "packaged",
+  )
+  .unwrap();
+  write_file(&r.target, ".config/mytool/settings.conf", "from target");
+  r.cmd()
+    .args(["create", "mytool", "--yes", "-f"])
+    .assert()
+    .success();
+  assert_eq!(
+    fs::read_to_string(r.source.join("mytool/.config/mytool/settings.conf")).unwrap(),
+    "from target"
+  );
+}
+
+#[test]
+fn create_merge_partial_conflict_nothing_moved() {
+  let r = rig();
+  fs::create_dir_all(r.source.join("mytool/.config/mytool")).unwrap();
+  fs::write(
+    r.source.join("mytool/.config/mytool/collide.conf"),
+    "packaged",
+  )
+  .unwrap();
+  write_file(&r.target, ".config/mytool/collide.conf", "from target");
+  write_file(&r.target, ".config/mytool/newfile.conf", "brand new");
+  r.cmd()
+    .args(["create", "mytool", "--yes"])
+    .assert()
+    .failure();
+  // nothing may be moved when something collides
+  assert_eq!(
+    fs::read_to_string(r.target.join(".config/mytool/collide.conf")).unwrap(),
+    "from target"
+  );
+  assert_eq!(
+    fs::read_to_string(r.target.join(".config/mytool/newfile.conf")).unwrap(),
+    "brand new"
+  );
+}

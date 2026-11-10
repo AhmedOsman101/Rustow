@@ -31,7 +31,7 @@ Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`.
 GNU Stow-compatible subset, not a full clone:
 
 - Package tree is mirrored onto `target` as symlinks.
-- **Fold**: when the target path for a package directory does not exist, the whole directory becomes a single symlink into the package (stow behavior).
+- **Fold**: when the target path for a package directory does not exist, the whole directory becomes a single symlink into the package (stow behavior) — except when the subtree contains ignored paths (e.g. a nested `.git`), in which case the tool descends and links per-file so ignored data is never exposed through a symlink.
 - **Unfold**: when a target directory (real dir, or symlink owned by rustow/stow from another package) collides with a folded dir from another package, the folded link is replaced by a real directory and both package subtrees are stowed individually into it.
 - **Refold** (on `unlink`): a now-empty/link-only target directory whose links all point into one package subtree is collapsed back into a single symlink.
 - Ownership: a symlink is "owned" if its resolved target lies inside the configured `source` dir (any package), or was created by rustow. GNU stow creates absolute links into the stow dir, so this is compatible with existing setups.
