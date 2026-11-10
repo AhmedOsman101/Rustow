@@ -200,54 +200,67 @@ fn dangling_link_counts_as_not_linked_not_crash() {
 
 #[test]
 fn status_state_filter_linked_exit_zero() {
-    let r = rig();
-    make_pkg(&r.source, "eza", &[".config/eza/theme.yml"]);
-    make_pkg(&r.source, "zsh", &[".zshrc"]);
-    r.cmd().args(["link", "eza"]).assert().success();
-    let out = r.cmd().args(["status", "--state", "linked"]).assert().success();
-    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(text.contains("eza"));
-    assert!(!text.contains("zsh"));
+  let r = rig();
+  make_pkg(&r.source, "eza", &[".config/eza/theme.yml"]);
+  make_pkg(&r.source, "zsh", &[".zshrc"]);
+  r.cmd().args(["link", "eza"]).assert().success();
+  let out = r
+    .cmd()
+    .args(["status", "--state", "linked"])
+    .assert()
+    .success();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("eza"));
+  assert!(!text.contains("zsh"));
 }
 
 #[test]
 fn status_state_filter_conflicts_only() {
-    let r = rig();
-    make_pkg(&r.source, "zsh", &[".zshrc"]);
-    make_pkg(&r.source, "eza", &[".config/eza/theme.yml"]);
-    fs::write(r.target.join(".zshrc"), "user contents").unwrap();
-    let out = r.cmd().args(["status", "--state", "conflict"]).assert().failure();
-    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(text.contains("zsh"));
-    assert!(!text.contains("eza"));
+  let r = rig();
+  make_pkg(&r.source, "zsh", &[".zshrc"]);
+  make_pkg(&r.source, "eza", &[".config/eza/theme.yml"]);
+  fs::write(r.target.join(".zshrc"), "user contents").unwrap();
+  let out = r
+    .cmd()
+    .args(["status", "--state", "conflict"])
+    .assert()
+    .failure();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("zsh"));
+  assert!(!text.contains("eza"));
 }
 
 #[test]
 fn status_state_filter_union_and_json() {
-    let r = rig();
-    make_pkg(&r.source, "zsh", &[".zshrc"]);
-    make_pkg(&r.source, "eza", &[".config/eza/theme.yml"]);
-    r.cmd().args(["link", "eza"]).assert().success();
-    let out = r
-        .cmd()
-        .args(["status", "--state", "unlinked", "--state", "partial", "--json"])
-        .assert()
-        .failure();
-    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let names: Vec<&str> = parsed["packages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["name"].as_str().unwrap())
-        .collect();
-    assert!(names.contains(&"zsh"));
-    assert!(!names.contains(&"eza"));
-    assert_eq!(parsed["summary"]["total"], 1);
+  let r = rig();
+  make_pkg(&r.source, "zsh", &[".zshrc"]);
+  make_pkg(&r.source, "eza", &[".config/eza/theme.yml"]);
+  r.cmd().args(["link", "eza"]).assert().success();
+  let out = r
+    .cmd()
+    .args([
+      "status", "--state", "unlinked", "--state", "partial", "--json",
+    ])
+    .assert()
+    .failure();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+  let names: Vec<&str> = parsed["packages"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|p| p["name"].as_str().unwrap())
+    .collect();
+  assert!(names.contains(&"zsh"));
+  assert!(!names.contains(&"eza"));
+  assert_eq!(parsed["summary"]["total"], 1);
 }
 
 #[test]
 fn status_state_filter_rejects_garbage() {
-    let r = rig();
-    r.cmd().args(["status", "--state", "bogus"]).assert().failure();
+  let r = rig();
+  r.cmd()
+    .args(["status", "--state", "bogus"])
+    .assert()
+    .failure();
 }

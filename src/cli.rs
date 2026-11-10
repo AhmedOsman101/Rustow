@@ -473,7 +473,12 @@ pub fn run(cli: Cli) -> Result<i32> {
       crate::create::plan_create(&mut ctx, &opts)?;
       Ok(0)
     }
-    Commands::Status { pkgs, short, json, states } => {
+    Commands::Status {
+      pkgs,
+      short,
+      json,
+      states,
+    } => {
       let app = App::new(&cli.global)?;
       let ignore = app.ignore()?;
       let pkgs = if pkgs.is_empty() {
