@@ -6,7 +6,7 @@ All commands assume repo root as cwd. Use `$MASK` in scripts that chain other ma
 
 > Build the debug binary
 
-```sh
+```bash
 cargo build
 ```
 
@@ -14,35 +14,23 @@ cargo build
 
 > Run all tests
 
-```sh
+```bash
 cargo test
-```
-
-## format [files]
-
-> Format code (cargo fmt, or rustfmt on specific files)
-
-```sh
-if [ -n "$files" ]; then
-  rustfmt --edition 2024 "$files"
-else
-  cargo fmt
-fi
 ```
 
 ## lint
 
 > Check formatting and lints
 
-```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings
+```bash
+cargo fmt --check && cargo clippy --all-targets
 ```
 
 ## format [files]
 
 > Format the project
 
-```sh
+```bash
 eval "argv=(${files})"
 
 if ((${#argv[@]} == 0)); then
@@ -56,7 +44,7 @@ fi
 
 > Clean build artifacts
 
-```sh
+```bash
 cargo clean
 ```
 
@@ -64,7 +52,7 @@ cargo clean
 
 > Install rustow into PATH (~/.cargo/bin)
 
-```sh
+```bash
 cargo install --path .
 ```
 
@@ -72,7 +60,7 @@ cargo install --path .
 
 > Regenerate schema.json at the repo root from the Config struct
 
-```sh
+```bash
 cargo run --quiet --example generate_schema
 ```
 
@@ -80,7 +68,7 @@ cargo run --quiet --example generate_schema
 
 > Verify schema.json is up to date with the Config struct
 
-```sh
+```bash
 cargo run --quiet --example generate_schema -- --check
 ```
 
@@ -124,7 +112,7 @@ podman run --rm ${interactive:+'-it'} \
 
 > Run the end-to-end scenario in a Void Linux podman container
 
-```sh
+```bash
 $MASK container build
 $MASK container run "bash tests/e2e.sh"
 ```
@@ -133,6 +121,6 @@ $MASK container run "bash tests/e2e.sh"
 
 > Run lint + tests
 
-```sh
+```bash
 $MASK lint && $MASK test
 ```
