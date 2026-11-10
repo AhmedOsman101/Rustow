@@ -42,9 +42,9 @@ pub struct GlobalArgs {
   #[arg(long, global = true)]
   pub adopt: bool,
 
-  /// Verbose output.
-  #[arg(short, long, global = true)]
-  pub verbose: bool,
+  /// Verbose output (-v per-package detail, -vv uncapped).
+  #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+  pub verbose: u8,
 
   /// Stow directory (source of packages); overrides config/env/stowrc.
   #[arg(long, global = true, value_name = "DIR")]
@@ -118,7 +118,7 @@ pub enum Commands {
     #[arg(value_name = "PACKAGE")]
     pkgs: Vec<String>,
     /// Print only the summary line.
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "verbose")]
     short: bool,
     /// Print machine-readable JSON.
     #[arg(long)]
@@ -253,7 +253,7 @@ impl<'a> App<'a> {
       self.globals.dry_run,
     ) {
       Ok(out) => {
-        if self.resolved.cfg.verbose || self.globals.verbose {
+        if self.resolved.cfg.verbose || self.globals.verbose > 0 {
           for plan in &plans {
             for action in &plan.actions {
               println!("{}", render_action(action));
@@ -295,7 +295,7 @@ impl<'a> App<'a> {
     } else {
       "unlinked"
     };
-    if self.resolved.cfg.verbose || self.globals.verbose {
+    if self.resolved.cfg.verbose || self.globals.verbose > 0 {
       for action in &plan.actions {
         let link::UnlinkAction::Unlink { dst } = action;
         println!("unlink {}", dst.display());
@@ -463,7 +463,7 @@ pub fn run(cli: Cli) -> Result<i32> {
       let opts = crate::create::CreateOptions {
         app,
         path,
-        verbose: app_state.resolved.cfg.verbose || cli.global.verbose,
+        verbose: app_state.resolved.cfg.verbose || cli.global.verbose > 0,
         interactive,
         empty,
         source,
@@ -498,6 +498,13 @@ pub fn run(cli: Cli) -> Result<i32> {
         );
       } else if json {
         println!("{}", crate::status::render_json(&packages)?);
+      } else if cli.global.verbose > 0 {
+        use std::io::IsTerminal;
+        let no_color = !std::io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some();
+        println!(
+          "{}",
+          crate::status::render_verbose(&packages, no_color, cli.global.verbose > 1)
+        );
       } else {
         use std::io::IsTerminal;
         let no_color = !std::io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some();

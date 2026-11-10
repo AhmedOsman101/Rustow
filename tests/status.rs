@@ -264,3 +264,46 @@ fn status_state_filter_rejects_garbage() {
     .assert()
     .failure();
 }
+
+#[test]
+fn status_verbose_shows_issue_lines() {
+  let r = rig();
+  make_pkg(&r.source, "zsh", &[".zshrc", ".config/zsh/rc.zsh"]);
+  r.cmd().args(["link", "zsh"]).assert().success();
+  fs::remove_file(r.target.join(".zshrc")).unwrap();
+  let out = r.cmd().args(["status", "-v", "zsh"]).assert().failure();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("zsh: partial"), "header missing, got: {text}");
+  assert!(text.contains("missing"));
+  assert!(text.contains(".zshrc"));
+}
+
+#[test]
+fn status_verbose_caps_and_vv_uncaps() {
+  let r = rig();
+  let root = r.source.join("big");
+  fs::create_dir_all(&root).unwrap();
+  for i in 1..=23 {
+    fs::write(root.join(format!(".file{i}")), "x").unwrap();
+  }
+  r.cmd().args(["link", "big"]).assert().success();
+  for i in 1..=23 {
+    fs::remove_file(r.target.join(format!(".file{i}"))).unwrap();
+  }
+  let capped = r.cmd().args(["status", "-v", "big"]).assert().failure();
+  let text = String::from_utf8(capped.get_output().stdout.clone()).unwrap();
+  assert_eq!(text.matches("missing").count(), 20);
+  assert!(text.contains("... and 3 more"));
+
+  let full = r.cmd().args(["status", "-vv", "big"]).assert().failure();
+  let text = String::from_utf8(full.get_output().stdout.clone()).unwrap();
+  assert_eq!(text.matches("missing").count(), 23);
+  assert!(!text.contains("... and"));
+}
+
+#[test]
+fn status_short_and_verbose_conflict() {
+  let r = rig();
+  make_pkg(&r.source, "zsh", &[".zshrc"]);
+  r.cmd().args(["status", "-s", "-v"]).assert().failure();
+}

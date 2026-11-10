@@ -21,7 +21,7 @@ The `status` command's design was informed by reading the status implementation 
 | `unlink <pkg>...` (aliases: `remove`, `rm`) | Unlink packages. Args required; no-args is failure. |
 | `reset` | Unlink all packages. |
 | `relink <pkg>...` | Unlink then link (restow). No-args is failure. Relink-all = `reset && sync`. |
-| `status [pkg...]` | Per-package table; filters by name. `-s\|--short` prints only the summary line; `--json` machine-readable output. Exit 0 iff all inspected packages are fully linked and conflict-free, else 1. No `--verbose`. |
+| `status [pkg...]` | Per-package table; filters by name. `-s\|--short` prints only the summary line; `--json` machine-readable output. `-v` prints per-issue text detail (20 issues per package max); `-vv` prints everything. Exit 0 iff all inspected packages are fully linked and conflict-free, else 1. `-s` and `-v` are mutually exclusive. |
 | `create <app>` (alias: `add`) | See "create workflow" below. |
 | `config default` | Print the annotated default config to stdout. |
 | `config init` | Write the default config to `$XDG_CONFIG_HOME/rustow/config.toml` (default `~/.config/rustow/config.toml`). Can pre-fill from an existing `.stowrc`/env when run interactively via the provenance prompt. |

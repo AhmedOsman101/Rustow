@@ -43,7 +43,7 @@ rustow reset             # remove all links
 | `unlink <pkg>...` (alias `remove`, `rm`) | Unlink packages |
 | `reset` | Unlink all packages |
 | `relink <pkg>...` | Unlink then re-link (restow) |
-| `status [pkg...]` | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable; `--state linked|partial|unlinked|conflict` to filter (repeatable; applies to `--json` too) |
+| `status [pkg...]` | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable; `--state linked|partial|unlinked|conflict` to filter (repeatable; applies to `--json` too); `-v` per-issue text detail (capped per package); `-vv` uncapped |
 | `create <app>` (alias `add`) | Create a package, optionally adopting an existing target path |
 | `config default` | Print the annotated default config |
 | `config init` | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one) |

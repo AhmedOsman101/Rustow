@@ -318,3 +318,60 @@ pub fn exit_code(packages: &[PackageStatus]) -> i32 {
     1
   }
 }
+
+const VERBOSE_ISSUE_CAP: usize = 20;
+
+fn cap_issues(cap: usize, all: bool) -> usize {
+  if all { usize::MAX } else { cap }
+}
+
+/// Human-oriented verbose rendering: per package, one header line with counts,
+/// then one line per issue (capped), plus a pointer to --json when truncated.
+pub fn render_verbose(packages: &[PackageStatus], no_color: bool, all: bool) -> String {
+  use owo_colors::OwoColorize;
+
+  let mut out = String::new();
+  for p in packages {
+    let notes = if p.notes.is_empty() {
+      "ok".to_string()
+    } else {
+      p.notes.join(", ")
+    };
+    out.push_str(&format!(
+      "{}: {} — {}\n",
+      p.name,
+      status_colored(p.status, no_color),
+      notes
+    ));
+    for issue in p.issues.iter().take(cap_issues(VERBOSE_ISSUE_CAP, all)) {
+      let marker = if issue.reason.starts_with("not linked") {
+        if no_color {
+          "missing".to_string()
+        } else {
+          "missing".yellow().to_string()
+        }
+      } else if no_color {
+        "conflict".to_string()
+      } else {
+        "conflict".bright_red().bold().to_string()
+      };
+      // conflicts carry a useful reason; "not linked" markers are self-explanatory
+      let line = if issue.reason.starts_with("not linked") {
+        format!("  {marker}  {}\n", issue.target)
+      } else {
+        format!("  {marker}  {} — {}\n", issue.target, issue.reason)
+      };
+      out.push_str(&line);
+    }
+    let remaining = p
+      .issues
+      .len()
+      .saturating_sub(cap_issues(VERBOSE_ISSUE_CAP, all));
+    if remaining > 0 {
+      out.push_str(&format!(
+        "  ... and {remaining} more (--json for the full list)\n"
+      ));
+    }
+  }
+  out
+}
