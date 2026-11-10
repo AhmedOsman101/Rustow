@@ -146,10 +146,10 @@ pub fn list_packages(source: &Path) -> Result<Vec<String>> {
   let mut out = Vec::new();
   let rd = fs::read_dir(source).map_err(Error::io(source))?;
   for item in rd.flatten() {
-    if item.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-      if let Some(name) = item.file_name().to_str() {
-        out.push(name.to_string());
-      }
+    if item.file_type().map(|t| t.is_dir()).unwrap_or(false)
+      && let Some(name) = item.file_name().to_str()
+    {
+      out.push(name.to_string());
     }
   }
   out.sort();

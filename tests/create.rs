@@ -4,7 +4,6 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
-use predicates::str::contains;
 
 struct Rig {
   _tmp: tempfile::TempDir,

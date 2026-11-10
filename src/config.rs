@@ -233,8 +233,8 @@ mod tests {
   fn default_toml_parses_and_matches_default() {
     let parsed: Config = toml::from_str(DEFAULT_CONFIG_TOML).unwrap();
     assert_eq!(parsed.ignore, default_ignore());
-    assert_eq!(parsed.verbose, true);
-    assert_eq!(parsed.fold, true);
+    assert!(parsed.verbose);
+    assert!(parsed.fold);
     assert_eq!(parsed.on_conflict, ConflictPolicy::Prompt);
     assert!(parsed.source.is_none());
   }
@@ -335,10 +335,10 @@ pub fn parse_stowrc(contents: &str) -> Result<Stowrc> {
           }
         }
         "--verbose" | "-v" => {
-          out.verbose = Some(match value.as_deref() {
-            Some("0") | Some("false") | Some("no") => false,
-            _ => true,
-          });
+          out.verbose = Some(!matches!(
+            value.as_deref(),
+            Some("0") | Some("false") | Some("no")
+          ));
           if value.is_none() {
             // consume nothing; value was inline flag
           }

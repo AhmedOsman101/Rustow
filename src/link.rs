@@ -330,7 +330,7 @@ impl<'a> Planner<'a> {
       }
       Probe::Symlink(Some(resolved)) => {
         let own_pkg_root = self.pkg_root();
-        let src_norm = lexical_normalize(&src_dir.to_path_buf());
+        let src_norm = lexical_normalize(src_dir);
         if resolved == src_norm {
           // re-stow of the same package where the fold is already in place
           self.actions.push(Action::SkipIdempotent {
@@ -513,14 +513,14 @@ impl<'a> Planner<'a> {
         detail: None,
       }),
       Probe::Symlink(maybe_target) => {
-        let src_abs = lexical_normalize(&src.to_path_buf());
+        let src_abs = lexical_normalize(src);
         match &maybe_target {
           Some(rl) if *rl == src_abs => {
             self.actions.push(Action::SkipIdempotent {
               dst: dst.to_path_buf(),
             });
           }
-          Some(rl) if rl.starts_with(&self.pkg_root()) => {
+          Some(rl) if rl.starts_with(self.pkg_root()) => {
             self.actions.push(Action::Repair {
               src: src.to_path_buf(),
               dst: dst.to_path_buf(),
@@ -605,7 +605,8 @@ pub fn cross_package_conflicts(
   target: &Path,
   pkg_entries: &HashMap<String, Vec<Entry>>,
 ) -> HashMap<String, Vec<Conflict>> {
-  let mut claims: HashMap<PathBuf, Vec<(&String, EntryKind, Option<PathBuf>)>> = HashMap::new();
+  type Claim<'a> = (&'a String, EntryKind, Option<PathBuf>);
+  let mut claims: HashMap<PathBuf, Vec<Claim<'_>>> = HashMap::new();
   let mut pkgs: Vec<&String> = pkg_entries.keys().collect();
   pkgs.sort();
   for pkg in &pkgs {
@@ -912,10 +913,10 @@ fn apply_link(src: &Path, dst: &Path) -> Result<()> {
         return Ok(()); // already correct
       }
       // stale plan — the world changed between plan and apply
-      return Err(Error::Message(format!(
+      Err(Error::Message(format!(
         "{} appeared while linking (plan was stale); re-run rustow",
         dst.display()
-      )));
+      )))
     }
     Err(_) => {
       std::os::unix::fs::symlink(src, dst).map_err(Error::io(dst))?;
@@ -1000,7 +1001,7 @@ pub fn plan_unlink(
 }
 
 fn walk_unlink(
-  source: &Path,
+  _source: &Path,
   target: &Path,
   pkg_root: &Path,
   subdir_abs: &Path,
@@ -1040,7 +1041,9 @@ fn walk_unlink(
       (true, Some(m)) if m.is_dir() => {
         plan.candidate_dirs.insert(dst.clone());
         let child_abs = child.clone();
-        walk_unlink(source, target, pkg_root, &child_abs, &pkg_rel, ignore, plan)?;
+        walk_unlink(
+          _source, target, pkg_root, &child_abs, &pkg_rel, ignore, plan,
+        )?;
       }
       (false, Some(m)) if m.file_type().is_symlink() => {
         if link_points_into(&dst, pkg_root) {
@@ -1152,7 +1155,7 @@ pub fn apply_unlink(
 
   // re-fold link-only dirs, deepest first; a refold can make a parent foldable too
   let mut dirs: Vec<PathBuf> = plan.candidate_dirs.iter().cloned().collect();
-  dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+  dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
   for dir in &dirs {
     try_refold(dir, target, source)?;
   }

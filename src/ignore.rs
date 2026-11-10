@@ -144,7 +144,7 @@ mod tests {
     assert!(ig.is_ignored(&p(".svn/entries")));
     assert!(ig.is_ignored(&p("_darcs/hashed")));
     assert!(ig.is_ignored(&p("theme.ple,v")));
-    assert!(ig.is_ignored(&p("a/b/c.hgtags.x,v").as_path()));
+    assert!(ig.is_ignored(p("a/b/c.hgtags.x,v").as_path()));
     assert!(!ig.is_ignored(&p(".config/nvim/init.lua")));
     assert!(!ig.is_ignored(&p(".config/eza/theme.yml")));
   }
