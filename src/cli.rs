@@ -123,7 +123,32 @@ pub enum Commands {
     /// Print machine-readable JSON.
     #[arg(long)]
     json: bool,
+    /// Only show packages in these states (repeatable): linked, partial, unlinked, conflict.
+    #[arg(long = "state", value_name = "STATE", value_enum)]
+    states: Vec<StatusFilter>,
   },
+}
+
+/// Status filter for `status --state`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum StatusFilter {
+  Linked,
+  Partial,
+  Unlinked,
+  Conflict,
+}
+
+impl StatusFilter {
+  fn matches(self, kind: crate::status::StatusKind) -> bool {
+    use crate::status::StatusKind as K;
+    match (self, kind) {
+      (StatusFilter::Linked, K::Linked)
+      | (StatusFilter::Partial, K::Partial)
+      | (StatusFilter::Unlinked, K::Unlinked)
+      | (StatusFilter::Conflict, K::Conflict) => true,
+      _ => false,
+    }
+  }
 }
 
 #[derive(Debug, Subcommand)]
@@ -448,7 +473,7 @@ pub fn run(cli: Cli) -> Result<i32> {
       crate::create::plan_create(&mut ctx, &opts)?;
       Ok(0)
     }
-    Commands::Status { pkgs, short, json } => {
+    Commands::Status { pkgs, short, json, states } => {
       let app = App::new(&cli.global)?;
       let ignore = app.ignore()?;
       let pkgs = if pkgs.is_empty() {
@@ -456,7 +481,10 @@ pub fn run(cli: Cli) -> Result<i32> {
       } else {
         pkgs
       };
-      let packages = crate::status::compute_many(app.source(), app.target(), &pkgs, &ignore)?;
+      let mut packages = crate::status::compute_many(app.source(), app.target(), &pkgs, &ignore)?;
+      if !states.is_empty() {
+        packages.retain(|p| states.iter().any(|s| s.matches(p.status)));
+      }
       let code = crate::status::exit_code(&packages);
       if short {
         println!(

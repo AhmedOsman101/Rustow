@@ -43,7 +43,7 @@ rustow reset             # remove all links
 | `unlink <pkg>...` (alias `remove`, `rm`) | Unlink packages |
 | `reset` | Unlink all packages |
 | `relink <pkg>...` | Unlink then re-link (restow) |
-| `status [pkg...]` | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable |
+| `status [pkg...]` | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable; `--state linked|partial|unlinked|conflict` to filter (repeatable; applies to `--json` too) |
 | `create <app>` (alias `add`) | Create a package, optionally adopting an existing target path |
 | `config default` | Print the annotated default config |
 | `config init` | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one) |
@@ -135,7 +135,7 @@ Schema for editors: [`schema.json`](./schema.json). The full annotated default: 
 - Nothing is ever deleted except links rustow (or a compatible stow) created — foreign symlinks and real files are never touched without an explicit `-f`/overwrite choice.
 - `--dry-run` previews all of the above.
 - Unlink removes only links pointing into the package (then re-folds link-only directories and removes empty directories it created). It never follows foreign symlinks.
-- Runtime junk (e.g. `pi` session data, a `.git` inside a folded package) is **not** linked when a nested `.git` is present in the tree — ignored paths never appear through folded symlinks either.
+- Ignored paths (the built-in default list — e.g. `.git` — plus your `ignore` globs) are never linked, and never appear through folded symlinks either.
 
 ## Differences from GNU Stow
 
@@ -146,7 +146,6 @@ rustow is a strict subset of Stow semantics — fold/unfold/refold, two-phase co
 - Full GNU Stow CLI/flag compatibility.
 - `.stow-local-ignore` / `.stow-global-ignore` (use `ignore` in `config.toml`).
 - Owning your dotfiles layout — rustow links what you give it; layout is yours.
-- Scripting your cutover: `rustow` never touches your live `$HOME` beyond what you invoke.
 
 ## Development
 
