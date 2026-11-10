@@ -141,13 +141,13 @@ pub enum StatusFilter {
 impl StatusFilter {
   fn matches(self, kind: crate::status::StatusKind) -> bool {
     use crate::status::StatusKind as K;
-    match (self, kind) {
+    matches!(
+      (self, kind),
       (StatusFilter::Linked, K::Linked)
-      | (StatusFilter::Partial, K::Partial)
-      | (StatusFilter::Unlinked, K::Unlinked)
-      | (StatusFilter::Conflict, K::Conflict) => true,
-      _ => false,
-    }
+        | (StatusFilter::Partial, K::Partial)
+        | (StatusFilter::Unlinked, K::Unlinked)
+        | (StatusFilter::Conflict, K::Conflict)
+    )
   }
 }
 
