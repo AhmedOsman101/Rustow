@@ -16,7 +16,7 @@
 
 ## Commands (mask is the task runner — use it, not raw cargo)
 
-- `mask check` — lint (`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`) + `cargo test`
+- `mask check` — lint (`cargo fmt --check` + `cargo clippy --all-targets`) + `cargo test`
 - `mask format [file...]` — `cargo fmt`, or rustfmt the given files (accepts a space-separated string via eval)
 - `mask test` — `cargo test`
 - `mask lint` — fmt check + clippy
