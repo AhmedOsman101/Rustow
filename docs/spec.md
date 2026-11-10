@@ -4,7 +4,9 @@
 
 ## Purpose
 
-A Stow-compatible dotfiles linker in Rust. GNU Stow 2.4.1 does the core job; rustow replaces it for one user's workflow, dropping full Stow compatibility in favor of a focused subset plus Tuckr-grade status/visualization UX. The tool links a package tree onto `$HOME` as symlinks.
+A Stow-compatible dotfiles linker in Rust. GNU Stow 2.4.1 does the core job; rustow replaces it for one user's workflow, dropping full Stow compatibility in favor of a focused subset plus a per-package status report. The tool links a package tree onto `$HOME` as symlinks.
+
+The `status` command's design was informed by reading the status implementation of [tuckr](https://github.com/RaphGL/Tuckr); all link semantics come from GNU Stow.
 
 - Source layout: one directory per package under `source` (e.g. `~/dotfiles/Configs/<pkg>/.config/<app>/...`). The package tree mirrors the target root (`$HOME`).
 - `rustow` operates on `$HOME` only when the user explicitly invokes a command. There is no background behavior, no implicit scan-and-fix, and no "live home" guard beyond the normal conflict semantics — that *is* the safety model.
@@ -172,7 +174,7 @@ Single crate, lib + thin bin:
 
 - Rust 1.99.0, edition 2024
 - Binary name `rustow`, crate name `rustow`
-- GNU Stow 2.4.1 is the behavior reference (`references/stow/`); Tuckr for UX reference (`references/tuckr/`)
+- GNU Stow 2.4.1 is the behavior reference (`references/stow/`); the status UX alone was informed by tuckr (`references/tuckr/`)
 - `mask` is the task runner (`maskfile.md` at repo root; `$MASK` for chaining)
 - Do not run any destructive operation against the real `$HOME`; all test rigs use tempdirs or the Void podman container
 - Conventional commits

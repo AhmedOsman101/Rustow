@@ -1,6 +1,6 @@
 # rustow
 
-A Stow-compatible dotfiles linker written in Rust, with a Tuckr-style status/visualization UX.
+A Stow-compatible dotfiles linker written in Rust, with a per-package health report built in.
 
 GNU Stow does the core job well; `rustow` replaces it for one workflow: one directory per package under a single source root, symlinked onto `$HOME`. It keeps Stow's tree-folding model (with the correctness fixes that come with a from-scratch rewrite) and adds a real `status` command, JSON output, interactive conflict resolution, and an `add`-style workflow.
 
@@ -137,10 +137,9 @@ Schema for editors: [`schema.json`](./schema.json). The full annotated default: 
 - Unlink removes only links pointing into the package (then re-folds link-only directories and removes empty directories it created). It never follows foreign symlinks.
 - Runtime junk (e.g. `pi` session data, a `.git` inside a folded package) is **not** linked when a nested `.git` is present in the tree — ignored paths never appear through folded symlinks either.
 
-## Differences from GNU Stow / Tuckr
+## Differences from GNU Stow
 
-- vs **GNU Stow**: a strict subset plus UX — `status`, JSON, interactive conflicts (merge/overwrite/skip), `create`, no `.stow-local-ignore` support, and conflict resolution instead of "abort everything with a wall of text".
-- vs **Tuckr**: rustow *is* Stow semantics (fold/unfold/refold) with the status/visualization UX — same mental model, one tool.
+rustow is a strict subset of Stow semantics — fold/unfold/refold, two-phase conflicts — plus a `status` report, JSON output, interactive conflict resolution (merge/overwrite/skip), a `create` workflow, and no `.stow-local-ignore` support (use `ignore` in `config.toml` instead).
 
 ## Non-goals
 
