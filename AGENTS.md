@@ -14,6 +14,14 @@
 - **When a re-plan is small, amend don't tack on.** Style-only follow-ups go in with `--amend --no-edit` (check push state first; never rewrite shared history).
 - **Verify before claiming.** "Done" requires the full output read: lint + all tests green. If something looks off mid-run, stop and say so instead of burying it.
 
+## CI & releases
+
+- Workflows under `.github/workflows/`: `ci.yml` (push/PR to main — `mask lint` + `mask schema check` + `mask test`, with `mask` via `taiki-e/install-action@v2`), `release-plz.yml`, `release.yml`, `dependabot-auto-merge.yml`.
+- Releases are release-plz driven: conventional commits on `main` open a release PR (version bump + changelog); merging it cuts the tag + GitHub release; `release.yml` then builds and attaches binaries (linux gnu/musl × x64/arm64 via `cross`, macOS ×2 on `macos-latest`, windows ×2 on `windows-latest`).
+- `publish = false` — no crates.io; releases are GitHub releases with `rustow-<os>-<libc|msvc>-<arch>` assets.
+- Repo settings (already enabled): Actions workflow permissions allow GitHub Actions to create and approve PRs; Settings → General → Features → Allow auto-merge (required by the dependabot auto-merge workflow).
+- Linux binaries are the only thing `mask release` builds locally; macOS/windows binaries exist only on the release assets.
+
 ## Commands (mask is the task runner — use it, not raw cargo)
 
 - `mask check` — lint (`cargo fmt --check` + `cargo clippy --all-targets`) + `cargo test`
@@ -23,6 +31,7 @@
 - `mask schema` — regenerate `schema.json` from `Config` (schemars); `mask schema check` verifies freshness (test enforces this)
 - `mask e2e` — builds `rustow-e2e` Void Linux container (`./Dockerfile`) and runs `tests/e2e.sh` (fake `$HOME`)
 - `mask install`, `mask build`, `mask clean`
+- `mask release` — cross-build linux release binaries into `./bin` (needs `cross`; macOS/windows artifacts are CI-only)
 - Single test: `cargo test --test link_unlink unfold_then_unlink_refolds`
 
 E2E notes: image is `ghcr.io/void-linux/void-glibc-full`; container must run with `--userns=keep-id` (rootless podman maps uids), else UID mismatch makes `/app/target` unwritable. Image build takes a few minutes; run `mask e2e` rather than the podman bits by hand.
