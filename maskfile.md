@@ -124,3 +124,41 @@ $MASK container run "bash tests/e2e.sh"
 ```bash
 $MASK lint && $MASK test
 ```
+
+## release [target]
+
+> Build linux release binaries into ./bin (needs `cross`); macOS/windows artifacts are built by the Release workflow
+
+**OPTIONS**
+* target
+    * flags: -t --target
+    * type: string
+    * desc: Single rustup target to build (default: all linux targets)
+    * choices: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+
+```bash
+if ! command -v cross &>/dev/null; then
+  echo "error: 'cross' is required — install with: cargo install cross --git https://github.com/cross-rs/cross" >&2
+  exit 1
+fi
+
+target_list=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl)
+
+if [[ -n "${target:-}" ]]; then
+  target_list=("${target}")
+fi
+
+mkdir -p bin
+for triple in "${target_list[@]}"; do
+  case "${triple}" in
+    x86_64-unknown-linux-gnu)   out="rustow-linux-gnu-x64" ;;
+    aarch64-unknown-linux-gnu)  out="rustow-linux-gnu-arm64" ;;
+    x86_64-unknown-linux-musl)  out="rustow-linux-musl-x64" ;;
+    aarch64-unknown-linux-musl) out="rustow-linux-musl-arm64" ;;
+    *) echo "unsupported target: ${triple}" >&2; exit 1 ;;
+  esac
+  echo "Building ${out} (${triple})"
+  DOCKER_DEFAULT_PLATFORM=linux/amd64 cross build --release --target "${triple}"
+  cp "target/${triple}/release/rustow" "bin/${out}"
+done
+```

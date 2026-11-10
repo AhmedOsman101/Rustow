@@ -14,6 +14,17 @@ GNU Stow does the core job well; `rustow` replaces it for one workflow: one dire
 cargo install --path .
 ```
 
+Prebuilt binaries are attached to each [GitHub release](https://github.com/AhmedOsman101/Rustow/releases):
+
+| Asset | Platform |
+|---|---|
+| `rustow-linux-gnu-x64` | Linux x86_64 (glibc) |
+| `rustow-linux-gnu-arm64` | Linux aarch64 (glibc) |
+| `rustow-linux-musl-x64` | Linux x86_64 (static musl) |
+| `rustow-linux-musl-arm64` | Linux aarch64 (static musl) |
+| `rustow-macos-x64` / `rustow-macos-arm64` | macOS x86_64 / Apple silicon |
+| `rustow-windows-x64.exe` / `rustow-windows-arm64.exe` | Windows x86_64 / arm64 |
+
 ## Quickstart
 
 Declare where your packages live (one directory per package) in `~/.config/rustow/config.toml`:
@@ -155,7 +166,10 @@ mask test         # cargo test
 mask check        # lint + tests
 mask e2e          # Void Linux podman container end-to-end run
 mask schema       # regenerate schema.json
+mask release      # cross-build linux release binaries into ./bin (needs `cross`)
 mask install      # cargo install --path .
 ```
+
+Releases are automated with [release-plz](https://github.com/release-plz/release-plz): merged conventional commits on `main` open a release PR (version bump + changelog); merging it cuts a GitHub release, and the Release workflow attaches cross-built binaries.
 
 License: GPL-2.0-or-later (see [LICENSE](./LICENSE)).
