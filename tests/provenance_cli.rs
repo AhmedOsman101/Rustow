@@ -110,7 +110,7 @@ fn stowrc_fallback_is_used_and_warns() {
 }
 
 #[test]
-fn config_toml_beats_stowrc_and_env_is_ignored_when_file_present() {
+fn config_toml_beats_stowrc_and_env_beats_config_toml() {
   let r = rig();
   r.make_pkg("zsh");
   // stowrc points elsewhere — must be ignored in favour of config.toml
@@ -139,6 +139,18 @@ fn config_toml_beats_stowrc_and_env_is_ignored_when_file_present() {
     .stderr(contains("stowrc").not())
     .stderr(contains("no config.toml").not());
   assert!(r.target.join(".zshrc").is_symlink());
+
+  // env beats config.toml per spec (CLI > env > file > stowrc)
+  let env_dir = r.home.join("env-src");
+  fs::create_dir_all(env_dir.join("zsh")).unwrap();
+  fs::write(env_dir.join("zsh/.zshrc-env"), "env version").unwrap();
+  r.cmd()
+    .env("DOTFILES_DIR", &env_dir)
+    .env("DOTFILES_TARGET", &r.target)
+    .args(["link", "zsh"])
+    .assert()
+    .success();
+  assert!(r.target.join(".zshrc-env").is_symlink());
 }
 
 #[test]

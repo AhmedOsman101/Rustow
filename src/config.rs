@@ -294,30 +294,35 @@ pub fn parse_stowrc(contents: &str) -> Result<Stowrc> {
       .ok_or_else(|| Error::Config(format!("stowrc line {}: unmatched quotes", lineno + 1)))?;
     let mut i = 0;
     while i < tokens.len() {
-      let tok = &tokens[i];
-      let (key, value) = match tok.split_once('=') {
-        Some((k, v)) => (k.to_string(), Some(v.to_string())),
-        None => {
-          if i + 1 < tokens.len() && !tokens[i + 1].starts_with('-') {
-            (tok.clone(), Some(tokens[i + 1].clone()))
-          } else {
-            (tok.clone(), None)
-          }
+      let tok = tokens[i].clone();
+      // inline `--key=value` form
+      if let Some((k, v)) = tok.split_once('=') {
+        match k {
+          "--dir" | "-d" => out.source = Some(PathBuf::from(expand_tilde_and_vars(v))),
+          "--target" | "-t" => out.target = Some(PathBuf::from(expand_tilde_and_vars(v))),
+          "--verbose" | "-v" => out.verbose = Some(!matches!(v, "0" | "false" | "no")),
+          "--ignore" => out.warnings.push(format!(
+            "stowrc line {}: --ignore is not supported by rustow (use `ignore` in config.toml)",
+            lineno + 1
+          )),
+          other => out.warnings.push(format!(
+            "stowrc line {}: ignoring unsupported option `{}`",
+            lineno + 1,
+            other
+          )),
         }
+        i += 1;
+        continue;
+      }
+      // separated `--key value` form: value is consumed here and i advances past it
+      let next_value = |i: &usize| -> Option<String> {
+        tokens.get(i + 1).filter(|t| !t.starts_with('-')).cloned()
       };
-      let take_value = |i: &mut usize| -> Result<Option<String>> {
-        match &value {
-          Some(v) => Ok(Some(v.clone())),
-          None => {
-            *i += 1;
-            Ok(tokens.get(*i).cloned())
-          }
-        }
-      };
-      match key.as_str() {
+      match tok.as_str() {
         "--dir" | "-d" => {
-          if let Some(v) = take_value(&mut i)? {
+          if let Some(v) = next_value(&i) {
             out.source = Some(PathBuf::from(expand_tilde_and_vars(&v)));
+            i += 1; // consume the value
           } else {
             out
               .warnings
@@ -325,8 +330,9 @@ pub fn parse_stowrc(contents: &str) -> Result<Stowrc> {
           }
         }
         "--target" | "-t" => {
-          if let Some(v) = take_value(&mut i)? {
+          if let Some(v) = next_value(&i) {
             out.target = Some(PathBuf::from(expand_tilde_and_vars(&v)));
+            i += 1;
           } else {
             out.warnings.push(format!(
               "stowrc line {}: --target needs a value",
@@ -335,22 +341,23 @@ pub fn parse_stowrc(contents: &str) -> Result<Stowrc> {
           }
         }
         "--verbose" | "-v" => {
-          out.verbose = Some(!matches!(
-            value.as_deref(),
-            Some("0") | Some("false") | Some("no")
-          ));
-          if value.is_none() {
-            // consume nothing; value was inline flag
-          }
+          out.verbose = Some(true);
         }
         "--ignore" => {
           out.warnings.push(format!(
             "stowrc line {}: --ignore is not supported by rustow (use `ignore` in config.toml)",
             lineno + 1
           ));
-          if value.is_none() {
-            i += 1; // swallow its value
+          if next_value(&i).is_some() {
+            i += 1; // swallow its value too
           }
+        }
+        "--adopt" | "--conflicts" | "--warn" | "--no-folding" | "--verbose-unstow"
+        | "--dotfiles" | "--override" => {
+          out.warnings.push(format!(
+            "stowrc line {}: ignoring unsupported option `{tok}`",
+            lineno + 1
+          ));
         }
         other => {
           out.warnings.push(format!(
@@ -385,42 +392,45 @@ pub struct ResolvedConfig {
 /// Resolve configuration: CLI flags > env vars (DOTFILES_DIR/DOTFILES_TARGET)
 /// > config.toml > ~/.stowrc (only when no config.toml exists).
 pub fn resolve(cli: &CliOverrides) -> Result<ResolvedConfig> {
-  // 1. config.toml (authoritative when present)
+  // 1. config.toml (base layer when present)
   let file_cfg = load_file()?;
   let mut cfg = file_cfg.clone().unwrap_or_default();
   let mut target = cfg.target.clone();
   let mut provenance = Provenance::File;
 
   let mut source = cfg.source.clone();
-  if file_cfg.is_none() {
-    // 2a. env vars
-    let env_dir = std::env::var_os(ENV_DIR).map(PathBuf::from);
-    let env_target = std::env::var_os(ENV_TARGET).map(PathBuf::from);
-    if let Some(d) = env_dir {
-      source = Some(PathBuf::from(expand_tilde_and_vars(&d.to_string_lossy())));
-      provenance = Provenance::Env;
-    }
-    if let Some(t) = env_target {
-      target = PathBuf::from(expand_tilde_and_vars(&t.to_string_lossy()));
-    }
-    // 2b. stowrc — only when still unresolved (env wins; file absent)
-    if source.is_none() {
-      let stowrc = stowrc_path();
-      if stowrc.exists() {
-        let contents = fs::read_to_string(&stowrc).map_err(Error::io(&stowrc))?;
-        let parsed = parse_stowrc(&contents)?;
-        for w in parsed.warnings {
-          eprintln!("rustow: warning: {w}");
-        }
-        if parsed.source.is_some() {
-          source = parsed.source;
-        }
-        if let Some(t) = parsed.target {
-          target = t;
-        }
-        if let Some(v) = parsed.verbose {
-          cfg.verbose = v;
-        }
+
+  // 2. env vars layer on TOP of the file (spec: env > file > stowrc)
+  let env_dir = std::env::var_os(ENV_DIR).map(PathBuf::from);
+  let env_target = std::env::var_os(ENV_TARGET).map(PathBuf::from);
+  if let Some(d) = env_dir {
+    source = Some(PathBuf::from(expand_tilde_and_vars(&d.to_string_lossy())));
+    provenance = Provenance::Env;
+  }
+  if let Some(t) = env_target {
+    target = PathBuf::from(expand_tilde_and_vars(&t.to_string_lossy()));
+    provenance = Provenance::Env;
+  }
+
+  // 2b. stowrc — only when no config file exists (env wins over it; spec: stowrc is a fallback)
+  if file_cfg.is_none() && source.is_none() {
+    let stowrc = stowrc_path();
+    if stowrc.exists() {
+      let contents = fs::read_to_string(&stowrc).map_err(Error::io(&stowrc))?;
+      let parsed = parse_stowrc(&contents)?;
+      for w in parsed.warnings {
+        eprintln!("rustow: warning: {w}");
+      }
+      if parsed.source.is_some() {
+        source = parsed.source;
+      }
+      if let Some(t) = parsed.target {
+        target = t;
+      }
+      if let Some(v) = parsed.verbose {
+        cfg.verbose = v;
+      }
+      if provenance != Provenance::Env {
         provenance = Provenance::StowRc;
       }
     }
@@ -435,9 +445,13 @@ pub fn resolve(cli: &CliOverrides) -> Result<ResolvedConfig> {
     target = PathBuf::from(expand_tilde_and_vars(&t.to_string_lossy()));
   }
 
-  // expand ~ on file-provided values
-  let source = source.map(|s| PathBuf::from(expand_tilde_and_vars(&s.to_string_lossy())));
-  let target = PathBuf::from(expand_tilde_and_vars(&target.to_string_lossy()));
+  // expand ~ on file-provided values, then lexically normalize (no `..` traversal)
+  let source = source.map(|s| {
+    crate::link::lexical_normalize(&PathBuf::from(expand_tilde_and_vars(&s.to_string_lossy())))
+  });
+  let target = crate::link::lexical_normalize(&PathBuf::from(expand_tilde_and_vars(
+    &target.to_string_lossy(),
+  )));
 
   let source = source.ok_or(Error::SourceNotSet)?;
   Ok(ResolvedConfig {

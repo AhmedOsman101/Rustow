@@ -418,18 +418,17 @@ impl<'a> Planner<'a> {
       let mut children: Vec<_> = children.flatten().collect();
       children.sort_by_key(|c| c.file_name());
       for child in children {
-        let subtree_rel = child
-          .path()
-          .strip_prefix(foreign_dir)
-          .unwrap()
-          .to_path_buf();
+        let Ok(subtree_rel) = child.path().strip_prefix(foreign_dir).map(PathBuf::from) else {
+          continue;
+        };
         let full_pkg_rel = prefix.join(&subtree_rel);
         if self.ignore.is_ignored(&full_pkg_rel) {
           continue;
         }
         let child_dst = dst.join(&subtree_rel);
         let child_abs = child.path();
-        if child_abs.is_dir() {
+        let child_is_dir = child.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if child_is_dir {
           if self.fold
             && !self.block_fold.contains(&child_dst)
             && !self.own_dir_claims.contains(&child_dst)
@@ -474,7 +473,9 @@ impl<'a> Planner<'a> {
       }
       let child_abs = child.path();
       let child_dst = dst.join(&name);
-      if child_abs.is_dir() {
+      // classify WITHOUT following symlinks — a package symlink is a leaf
+      let is_dir = child.file_type().map(|t| t.is_dir()).unwrap_or(false);
+      if is_dir {
         self.plan_dir(&child_abs, &child_pkg_rel, &child_dst);
       } else {
         self.plan_leaf(&child_abs, &child_pkg_rel, &child_dst);
@@ -653,9 +654,26 @@ pub struct LinkInput<'a> {
 
 /// Plan link actions for all packages up front, so the caller can abort the
 /// whole run on any conflict before touching the filesystem.
+fn validate_pkg(source: &Path, pkg: &str) -> Result<()> {
+  if pkg.is_empty()
+    || pkg == "."
+    || pkg == ".."
+    || pkg.contains('/')
+    || pkg.contains('\\')
+    || !source.join(pkg).is_dir()
+  {
+    return Err(Error::Message(format!(
+      "invalid package: {pkg:?} (must be a direct, existing subdirectory of {})",
+      source.display()
+    )));
+  }
+  Ok(())
+}
+
 pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
   let mut pkg_entries: HashMap<String, Vec<Entry>> = HashMap::new();
   for pkg in input.pkgs {
+    validate_pkg(input.source, pkg)?;
     pkg_entries.insert(pkg.clone(), scan_package(input.source, pkg, input.ignore)?);
   }
   let blocked = compute_blocked_folds(input.target, &pkg_entries);
@@ -755,13 +773,40 @@ pub struct ApplyOutcome {
 
 /// Apply link plans. All conflicts are resolved via `resolver` (or skipped
 /// per resolution). If any conflict resolves to Abort, nothing is applied.
-/// Action application is idempotent.
+/// Action application is idempotent. In `dry_run`, no resolution or fs change
+/// happens — conflicts are only counted and reported.
 pub fn apply_plans(
   plans: &[Plan],
   source: &Path,
   resolver: &mut dyn ConflictResolver,
   dry_run: bool,
 ) -> Result<ApplyOutcome> {
+  // dry-run: never resolve, never touch the fs — just report the plan
+  if dry_run {
+    let mut out = ApplyOutcome {
+      dry_run: true,
+      ..ApplyOutcome::default()
+    };
+    let mut conflicts = 0usize;
+    for plan in plans {
+      conflicts += plan.conflicts.len();
+      for a in &plan.actions {
+        match a {
+          Action::Link { .. } | Action::Fold { .. } => out.linked += 1,
+          Action::Repair { .. } => out.repaired += 1,
+          _ => {}
+        }
+      }
+    }
+    if conflicts > 0 {
+      out.warnings.push(format!(
+        "{conflicts} conflict(s) unresolved (dry run — nothing was changed)"
+      ));
+      out.skipped = conflicts;
+    }
+    return Ok(out);
+  }
+
   // 1. conflicts first — two-phase
   let mut outcomes: Vec<(Conflict, PromptOutcome)> = Vec::new();
   for plan in plans {
@@ -779,6 +824,7 @@ pub fn apply_plans(
   let mut adopted: Vec<(PathBuf, PathBuf)> = Vec::new(); // (target, package_src)
   let mut overwritten: Vec<PathBuf> = Vec::new();
   let mut skip_dsts: HashSet<PathBuf> = HashSet::new();
+  let mut fixup_dsts: HashSet<PathBuf> = HashSet::new();
   for (c, outcome) in outcomes {
     let src = c.src.clone();
     match outcome {
@@ -787,11 +833,13 @@ pub fn apply_plans(
       }
       PromptOutcome::Overwrite | PromptOutcome::Merge => {
         overwritten.push(c.dst.clone());
+        fixup_dsts.insert(c.dst.clone());
         if let Some(src) = src {
           actions.push(Action::Link { src, dst: c.dst });
         }
       }
       PromptOutcome::Adopt => {
+        fixup_dsts.insert(c.dst.clone());
         if let Some(src) = src {
           adopted.push((c.dst.clone(), src.clone()));
           actions.push(Action::Link { src, dst: c.dst });
@@ -800,33 +848,31 @@ pub fn apply_plans(
       PromptOutcome::Abort => unreachable!("checked above"),
     }
   }
+  let mut suppressed = 0usize;
   for plan in plans {
     for a in &plan.actions {
       match a {
         Action::SkipIdempotent { .. } => {}
-        Action::Link { dst, .. } if skip_dsts.contains(dst) => {}
+        Action::Link { dst, .. } | Action::Fold { dst, .. } | Action::Repair { dst, .. }
+          if skip_dsts.contains(dst) || fixup_dsts.contains(dst) =>
+        {
+          suppressed += 1;
+        }
         other => actions.push(other.clone()),
       }
     }
   }
 
+  let mut out_warnings: Vec<String> = Vec::new();
+  if suppressed > 0 {
+    out_warnings.push(format!(
+      "suppressed {suppressed} duplicate link action(s) at targets claimed by another package"
+    ));
+  }
   let mut out = ApplyOutcome {
     dry_run,
     ..ApplyOutcome::default()
   };
-  let mut out_warnings: Vec<String> = Vec::new();
-  if dry_run {
-    // count without touching the fs
-    for a in &actions {
-      match a {
-        Action::Link { .. } | Action::Fold { .. } => out.linked += 1,
-        Action::Repair { .. } => out.repaired += 1,
-        _ => {}
-      }
-    }
-    out.skipped = skip_dsts.len();
-    return Ok(out);
-  }
 
   // 3. adopt/overwrite fixups before linking
   let mut drop_actions: HashSet<PathBuf> = HashSet::new();
@@ -846,11 +892,27 @@ pub fn apply_plans(
     if let Some(parent) = src.parent() {
       fs::create_dir_all(parent).map_err(Error::io(parent))?;
     }
-    fs::rename(target, src).map_err(Error::io(target))?;
+    if let Err(rename_err) = fs::rename(target, src) {
+      // cross-device: copy then remove (rename cannot cross filesystems)
+      fs::copy(target, src).map_err(|e| {
+        Error::Message(format!(
+          "adopt: failed to move {} into the package ({rename_err}; copy also failed: {e})",
+          target.display()
+        ))
+      })?;
+      fs::remove_file(target).map_err(Error::io(target))?;
+    }
   }
   for target in &overwritten {
     if target.is_dir() && !target.is_symlink() {
-      fs::remove_dir_all(target).map_err(Error::io(target))?;
+      // never delete a real directory tree — leave it alone and skip the link
+      out_warnings.push(format!(
+        "refusing to overwrite real directory {} — left untouched",
+        target.display()
+      ));
+      skip_dsts.insert(target.clone());
+      drop_actions.insert(target.clone());
+      continue;
     } else if target.exists() || target.is_symlink() {
       fs::remove_file(target).map_err(Error::io(target))?;
     }
@@ -866,7 +928,16 @@ pub fn apply_plans(
       Action::Mkdir { dst } => {
         fs::create_dir_all(dst).map_err(Error::io(dst))?;
       }
-      Action::Fold { src_dir, dst } | Action::Link { src: src_dir, dst } => {
+      Action::Fold { src_dir, dst } => {
+        // a Fold aimed at an existing owned symlink is a stale fold from an
+        // earlier run with a renamed package dir — replace it
+        if dst.is_symlink() && is_owned_link(dst, source) {
+          fs::remove_file(dst).map_err(Error::io(dst))?;
+        }
+        apply_link(src_dir, dst)?;
+        out.linked += 1;
+      }
+      Action::Link { src: src_dir, dst } => {
         apply_link(src_dir, dst)?;
         out.linked += 1;
       }
@@ -983,6 +1054,7 @@ pub fn plan_unlink(
 ) -> Result<UnlinkPlan> {
   let mut plan = UnlinkPlan::default();
   for pkg in pkgs {
+    validate_pkg(source, pkg)?;
     let pkg_root = source.join(pkg);
     if !pkg_root.is_dir() {
       return Err(Error::PackageNotFound(pkg.clone()));
@@ -1071,7 +1143,12 @@ fn link_points_into(dst: &Path, pkg_root: &Path) -> bool {
 /// If `dir` is a real dir whose children are ALL symlinks resolving into one
 /// package's matching subtree (`source/<pkg>/<dir-rel>`), return that subtree.
 /// The target root itself is never refolded.
-pub fn refolded_dir(dir: &Path, target: &Path, source: &Path) -> Option<PathBuf> {
+pub fn refolded_dir(
+  dir: &Path,
+  target: &Path,
+  source: &Path,
+  ignore: &crate::ignore::Ignore,
+) -> Option<PathBuf> {
   if dir == target || !dir.starts_with(target) {
     return None;
   }
@@ -1100,8 +1177,18 @@ pub fn refolded_dir(dir: &Path, target: &Path, source: &Path) -> Option<PathBuf>
     let rl = resolve_symlink(child)?;
     // package subtree corresponding to `dir`: the deepest ancestor of rl ending with rel
     let pkg_dir = rl.ancestors().find(|a| a.ends_with(&rel))?.to_path_buf();
+    // must be a package subtree: source/<pkg>/<rel> with <pkg> a direct child of source
     if !pkg_dir.starts_with(source) || !pkg_dir.is_dir() {
       return None;
+    }
+    let from_source = pkg_dir.strip_prefix(source).ok()?;
+    let mut comps = from_source.components();
+    let Some(std::path::Component::Normal(pkg_name)) = comps.next() else {
+      return None;
+    };
+    let rest: PathBuf = comps.collect();
+    if rest != rel || !source.join(pkg_name).is_dir() {
+      return None; // not a <source>/<pkg>/<rel> shape — refuse to refold anything else
     }
     match &common {
       None => common = Some(pkg_dir),
@@ -1109,11 +1196,33 @@ pub fn refolded_dir(dir: &Path, target: &Path, source: &Path) -> Option<PathBuf>
       Some(_) => return None,
     }
   }
-  common
+  let package_dir = common?;
+  // never refold a subtree containing ignored paths (e.g. nested .git) —
+  // the spec's "ignored data is never exposed through a symlink" covers unlink too
+  for item in WalkDir::new(&package_dir)
+    .follow_links(false)
+    .into_iter()
+    .flatten()
+  {
+    let sub = match item.path().strip_prefix(&package_dir) {
+      Ok(p) if p.as_os_str().is_empty() => continue,
+      Ok(p) => p,
+      Err(_) => continue,
+    };
+    if ignore.is_ignored(&rel.join(sub)) {
+      return None;
+    }
+  }
+  Some(package_dir)
 }
 
-fn try_refold(dir: &Path, target: &Path, source: &Path) -> Result<bool> {
-  let Some(package_dir) = refolded_dir(dir, target, source) else {
+fn try_refold(
+  dir: &Path,
+  target: &Path,
+  source: &Path,
+  ignore: &crate::ignore::Ignore,
+) -> Result<bool> {
+  let Some(package_dir) = refolded_dir(dir, target, source, ignore) else {
     return Ok(false);
   };
   for child in fs::read_dir(dir).map_err(Error::io(dir))?.flatten() {
@@ -1137,6 +1246,7 @@ pub fn apply_unlink(
   plan: &UnlinkPlan,
   target: &Path,
   source: &Path,
+  ignore: &crate::ignore::Ignore,
   dry_run: bool,
 ) -> Result<usize> {
   let mut removed = 0usize;
@@ -1149,15 +1259,16 @@ pub fn apply_unlink(
     let UnlinkAction::Unlink { dst } = action;
     if dst.is_symlink() {
       fs::remove_file(dst).map_err(Error::io(dst))?;
+      removed += 1;
     }
-    removed += 1;
+    // dst no longer a symlink (changed since planning): skip, don't count
   }
 
   // re-fold link-only dirs, deepest first; a refold can make a parent foldable too
   let mut dirs: Vec<PathBuf> = plan.candidate_dirs.iter().cloned().collect();
   dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
   for dir in &dirs {
-    try_refold(dir, target, source)?;
+    try_refold(dir, target, source, ignore)?;
   }
 
   // remove dirs that became empty (walk deepest candidates + their parents)

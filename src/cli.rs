@@ -258,7 +258,13 @@ impl<'a> App<'a> {
   fn unlink_pkgs(&self, pkgs: &[String]) -> Result<i32> {
     let ignore = self.ignore()?;
     let plan = link::plan_unlink(self.source(), self.target(), pkgs, &ignore)?;
-    let n = link::apply_unlink(&plan, self.target(), self.source(), self.globals.dry_run)?;
+    let n = link::apply_unlink(
+      &plan,
+      self.target(),
+      self.source(),
+      &ignore,
+      self.globals.dry_run,
+    )?;
     let verb = if self.globals.dry_run {
       "would unlink"
     } else {
@@ -330,12 +336,16 @@ impl ConflictResolver for PromptResolver {
         "abort everything",
       ]
     };
+    // a cancelled prompt (Esc) means "skip this file" per the spec, not a hard error
     let choice = Select::new()
       .with_prompt("what would you like to do?")
       .items(&items)
       .default(0)
       .interact()
-      .map_err(|e| Error::Message(format!("prompt failed: {e}")))?;
+      .unwrap_or_else(|e| {
+        eprintln!("prompt cancelled: {e} — treating as skip");
+        if is_regular_file { 2 } else { 1 } // skip index in both layouts
+      });
     if is_regular_file {
       match choice {
         0 => {

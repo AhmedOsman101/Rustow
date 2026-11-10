@@ -170,16 +170,18 @@ fn collect_move(src: &Path, dst: &Path) -> Result<(Vec<MoveItem>, Vec<PathBuf>)>
   for entry in walkdir::WalkDir::new(src).follow_links(false) {
     let entry = entry.map_err(|e| Error::Message(e.to_string()))?;
     if entry.path() == src {
-      // top-level dir itself
+      // top-level dir itself — never merge through a symlink at dst
       if dst.exists() || dst.is_symlink() {
-        if dst.is_dir() {
+        if dst.is_dir() && !dst.is_symlink() {
           continue; // merge into it
         }
         collisions.push(dst.to_path_buf());
       }
       continue;
     }
-    let rel = entry.path().strip_prefix(src).unwrap();
+    let Ok(rel) = entry.path().strip_prefix(src).map(PathBuf::from) else {
+      continue;
+    };
     let to = dst.join(rel);
     if entry.file_type().is_dir() {
       // dir collision only when dst path is a non-directory
@@ -269,14 +271,35 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
   }
   let default_relpath = format!(".config/{app}");
   let raw_relpath = opts.path.as_deref().unwrap_or(default_relpath.as_str());
-  // validate relpath stays inside the package (no .., no absolute)
+  // validate relpath stays inside the package: no absolute paths, no `..`,
+  // and it must contain at least one real (Normal) component — otherwise
+  // `--path .` would rename the whole target root into the package
   if Path::new(raw_relpath).is_absolute() || raw_relpath.split('/').any(|c| c == "..") {
     return Err(Error::Message(format!("invalid --path: {raw_relpath:?}")));
   }
   let relpath = raw_relpath.trim_start_matches('/');
+  if !Path::new(relpath)
+    .components()
+    .any(|c| matches!(c, std::path::Component::Normal(_)))
+  {
+    return Err(Error::Message(format!(
+      "invalid --path: {raw_relpath:?} (needs at least one path component)"
+    )));
+  }
   let pkg = pkg_dir(ctx, app);
   let dst = dst_for(ctx, app, relpath);
   let src = src_for(ctx, app, relpath, opts.source.as_deref());
+  // --source must never be the package dir, the package's ancestors (incl. source root), or inside it
+  if let Some(explicit) = opts.source.as_ref() {
+    let pkg_norm = crate::link::lexical_normalize(&pkg);
+    let src_norm = crate::link::lexical_normalize(explicit);
+    if src_norm == pkg_norm || src_norm.starts_with(&pkg_norm) || pkg_norm.starts_with(&src_norm) {
+      return Err(Error::Message(format!(
+        "--source {} must not be the package itself or an ancestor of it",
+        explicit.display()
+      )));
+    }
+  }
 
   // both flags → error
   if opts.empty && opts.source.is_some() {
@@ -310,6 +333,18 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
 
   // source exists (pkg may or may not exist) → move/merge into the package
   if src.exists() {
+    // a symlink at the package destination would redirect the whole move
+    // outside the package — never move through it
+    if dst.is_symlink() {
+      if !opts.force {
+        return Err(Error::Conflicts(format!(
+          "{} is a symlink — refusing to move the source through it (use -f/--force to remove it first)",
+          dst.display()
+        )));
+      }
+      eprintln!("warning: removing symlink at {} (-f)", dst.display());
+      fs::remove_file(&dst).map_err(Error::io(&dst))?;
+    }
     let (items, collisions) = collect_move(&src, &dst)?;
     if !collisions.is_empty() {
       if !opts.force {

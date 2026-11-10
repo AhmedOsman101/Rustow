@@ -116,10 +116,17 @@ pub fn compute_package(
     }
     let dst = target.join(&entry.pkg_rel);
     if entry.kind == EntryKind::Dir {
-      if dst.is_symlink() && is_pkg_link(&dst, &pkg_root) {
+      if dst.is_symlink() && is_pkg_link(&dst, &pkg_root) && fs::metadata(&dst).is_ok() {
         // folded link — covers the whole subtree
         covered_prefixes.push(format!("{rel}/"));
         linked += 1;
+      } else if dst.is_symlink() && is_pkg_link(&dst, &pkg_root) {
+        // dangling fold — the subtree is NOT reachable through it; children report individually
+        conflicts += 1;
+        issues.push(EntryIssue {
+          target: dst.display().to_string(),
+          reason: "dangling fold link".to_string(),
+        });
       }
       // real dir (or missing) — children are checked individually
       continue;
@@ -128,7 +135,15 @@ pub fn compute_package(
     match fs::symlink_metadata(&dst) {
       Ok(meta) if meta.file_type().is_symlink() => {
         if is_pkg_link(&dst, &pkg_root) {
-          linked += 1;
+          if fs::metadata(&dst).is_ok() {
+            linked += 1;
+          } else {
+            missing += 1;
+            issues.push(EntryIssue {
+              target: dst.display().to_string(),
+              reason: "dangling link".to_string(),
+            });
+          }
         } else if let Some(rl) = resolve_link(&dst) {
           if rl.starts_with(source) {
             conflicts += 1;
