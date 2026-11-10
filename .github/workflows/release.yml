@@ -103,7 +103,7 @@ jobs:
           cp binaries/binaries-linux/* binaries/binaries-macos/* binaries/binaries-windows/* release/
 
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             release/rustow-linux-gnu-x64
