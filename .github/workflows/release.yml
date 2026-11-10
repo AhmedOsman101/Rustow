@@ -27,7 +27,7 @@ jobs:
         run: mask release
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-linux
           path: bin/
@@ -54,7 +54,7 @@ jobs:
           cp target/aarch64-apple-darwin/release/rustow bin/rustow-macos-arm64
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-macos
           path: bin/
@@ -81,7 +81,7 @@ jobs:
           copy target/aarch64-pc-windows-msvc/release/rustow.exe bin/rustow-windows-arm64.exe
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-windows
           path: bin/
