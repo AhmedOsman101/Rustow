@@ -28,6 +28,26 @@ jobs:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # release-plz creates the GitHub release with the workflow-local
+      # GITHUB_TOKEN, which by GitHub's anti-fanout rule never emits
+      # `release: published` for other workflows. Branch a manual dispatch of
+      # the Release build off this job instead — only when a release was just
+      # cut (latest release < 10 minutes old). Without this the binary build
+      # never fires.
+      - name: Dispatch Release build if a release was just published
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name)"
+          CREATED="$(gh api repos/${{ github.repository }}/releases/latest --jq .created_at)"
+          NOW=$(date -u +%s)
+          THEN=$(date -u -d "$CREATED" +%s)
+          if [ $((NOW - THEN)) -le 600 ]; then
+            echo "fresh release $TAG; dispatching Release build"
+            gh workflow run Release --ref main -f tag="$TAG"
+          else
+            echo "latest release $TAG is old; skipping Release dispatch"
+          fi
 
   release-plz-pr:
     name: Release-plz PR
