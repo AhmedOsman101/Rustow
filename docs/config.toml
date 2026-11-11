@@ -16,6 +16,10 @@ verbose = true
 # (GNU stow's "folding"; false = always link individual files). Default: true.
 fold = true
 
+# Packages that must not be folded (default: empty). Use when a single app
+# needs per-file links but you don't want to disable fold globally.
+# fold_ignore = ["my-special-app"]
+
 # Extra glob patterns ignored on top of the built-in GNU Stow 2.4.1 default list.
 # Matched against package-relative paths with globset, e.g. "**/node_modules/**".
 ignore = [

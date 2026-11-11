@@ -43,6 +43,7 @@ fn link(f: &Fixture, pkgs: &[&str]) {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap();
@@ -117,6 +118,7 @@ fn unlink_never_removes_foreign_symlink() {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap();
@@ -151,6 +153,7 @@ fn dry_run_changes_nothing() {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap();
@@ -210,6 +213,7 @@ fn conflict_overwrite_resolution_replaces_real_file() {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap();
@@ -240,6 +244,7 @@ fn conflict_adopt_moves_target_into_package() {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap();
@@ -275,6 +280,7 @@ fn conflict_skip_leaves_target_alone() {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap();
@@ -305,6 +311,7 @@ fn abort_resolver_changes_nothing() {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap();

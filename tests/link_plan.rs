@@ -48,6 +48,7 @@ fn link_all(f: &Fixture, pkgs: &[&str]) -> Vec<rustow::link::Plan> {
     target: &f.target,
     pkgs: &pkgs,
     fold: true,
+    fold_ignore: &[],
     ignore: &ignore,
   })
   .unwrap()
@@ -394,6 +395,7 @@ fn env_home_expansion_is_not_done_by_planner() {
       target: &f.target,
       pkgs: &["nonexistent".to_string()],
       fold: true,
+      fold_ignore: &[],
       ignore: &Ignore::new(&[]).unwrap(),
     })
     .is_err()
@@ -408,6 +410,7 @@ fn missing_package_errors() {
     target: &f.target,
     pkgs: &["ghost".to_string()],
     fold: true,
+    fold_ignore: &[],
     ignore: &Ignore::new(&[]).unwrap(),
   })
   .unwrap_err();
@@ -438,5 +441,69 @@ fn fold_blocked_when_subtree_contains_ignored_paths() {
       .actions
       .iter()
       .any(|a| matches!(a, Action::Link { dst, .. } if dst.to_string_lossy().contains(".git")))
+  );
+}
+
+#[test]
+fn fold_ignore_prevents_folding_for_listed_package() {
+  let f = fixture();
+  make_pkg(
+    &f.source,
+    "aha",
+    &[".config/aha/theme.yml", ".config/aha/x.yml"],
+  );
+  make_pkg(&f.source, "nah", &[".zshrc"]);
+  let ignore = Ignore::new(&[]).unwrap();
+  let pkgs = vec!["aha".to_string(), "nah".to_string()];
+  let fold_ignore = vec!["aha".to_string()]; // aha listed → no fold
+  let plans = plan_link_all(&LinkInput {
+    source: &f.source,
+    target: &f.target,
+    pkgs: &pkgs,
+    fold: true,
+    fold_ignore: &fold_ignore,
+    ignore: &ignore,
+  })
+  .unwrap();
+  let aha = plans.iter().find(|p| {
+    p.actions
+      .iter()
+      .any(|a| matches!(a, Action::Mkdir { dst } if dst.ends_with("aha")))
+  });
+  assert!(
+    aha.is_some(),
+    "aha must be demoted to Mkdir+children, plans: {:?}",
+    plans
+  );
+  assert!(
+    !plans.iter().any(|p| p
+      .actions
+      .iter()
+      .any(|a| matches!(a, Action::Fold { dst, .. } if dst == &f.target.join(".config/aha")))),
+    "aha must not fold"
+  );
+}
+
+#[test]
+fn fold_ignore_does_not_block_unrelated_packages() {
+  let f = fixture();
+  make_pkg(&f.source, "aha", &[".config/aha/theme.yml"]);
+  let ignore = Ignore::new(&[]).unwrap();
+  let pkgs = vec!["aha".to_string()];
+  let fold_ignore = vec!["nope".to_string()]; // aha NOT listed
+  let plans = plan_link_all(&LinkInput {
+    source: &f.source,
+    target: &f.target,
+    pkgs: &pkgs,
+    fold: true,
+    fold_ignore: &fold_ignore,
+    ignore: &ignore,
+  })
+  .unwrap();
+  assert!(
+    plans[0]
+      .actions
+      .iter()
+      .any(|a| matches!(a, Action::Fold { dst, .. } if dst == &f.target.join(".config")))
   );
 }

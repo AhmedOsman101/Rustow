@@ -650,6 +650,8 @@ pub struct LinkInput<'a> {
   pub target: &'a Path,
   pub pkgs: &'a [String],
   pub fold: bool,
+  /// Package names in this list will not be folded (they get per-file links instead).
+  pub fold_ignore: &'a [String],
   pub ignore: &'a Ignore,
 }
 
@@ -683,6 +685,7 @@ pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
   let mut plans = Vec::with_capacity(input.pkgs.len());
   for pkg in input.pkgs {
     let entries = pkg_entries.get(pkg).cloned().unwrap_or_default();
+    let pkg_fold = input.fold && !input.fold_ignore.iter().any(|p| p == pkg);
     let entries_dirs: Vec<PathBuf> = entries
       .iter()
       .filter(|e| e.kind == EntryKind::Dir)
@@ -692,7 +695,7 @@ pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
       input.source,
       input.target,
       pkg,
-      input.fold,
+      pkg_fold,
       input.ignore,
       blocked.clone(),
       entries_dirs,

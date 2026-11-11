@@ -27,6 +27,7 @@ pub struct CreateContext {
   pub target: PathBuf,
   pub dry_run: bool,
   pub fold: bool,
+  pub fold_ignore: Vec<String>,
   pub ignore_globs: Vec<String>,
   /// Same conflict policy as `link` (selected from global flags/config).
   pub conflict_resolver: Box<dyn ConflictResolver>,
@@ -526,6 +527,7 @@ fn link_existing(ctx: &mut CreateContext, app: &str) -> Result<CreateOutcome> {
     target: &ctx.target,
     pkgs: &pkgs,
     fold: ctx.fold,
+    fold_ignore: &ctx.fold_ignore,
     ignore: &ignore,
   })?;
   // conflicts abort with the full report (prebuilt by apply_plans); nothing is changed

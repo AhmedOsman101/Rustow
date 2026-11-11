@@ -242,6 +242,7 @@ impl<'a> App<'a> {
       target: self.target(),
       pkgs,
       fold: self.resolved.cfg.fold,
+      fold_ignore: &self.resolved.cfg.fold_ignore,
       ignore: &ignore,
     })?;
 
@@ -457,6 +458,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         target: app_state.target().to_path_buf(),
         dry_run: cli.global.dry_run,
         fold: app_state.resolved.cfg.fold,
+        fold_ignore: app_state.resolved.cfg.fold_ignore.clone(),
         ignore_globs: app_state.resolved.cfg.ignore.clone(),
         conflict_resolver: app_state.make_resolver(),
       };

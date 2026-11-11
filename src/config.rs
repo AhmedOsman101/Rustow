@@ -65,6 +65,9 @@ pub struct Config {
   /// Fold package directories into single symlinks where possible.
   #[serde(default = "default_fold")]
   pub fold: bool,
+  /// Packages in this list will never be folded (per-package `fold = false`).
+  #[serde(default)]
+  pub fold_ignore: Vec<String>,
   /// Extra glob patterns ignored on top of the built-in stow default list.
   #[serde(default = "default_ignore")]
   pub ignore: Vec<String>,
@@ -102,6 +105,7 @@ impl Default for Config {
       target: default_target(),
       verbose: default_verbose(),
       fold: default_fold(),
+      fold_ignore: Vec::new(),
       ignore: default_ignore(),
       diff_tool: None,
       on_conflict: ConflictPolicy::Prompt,
@@ -163,6 +167,10 @@ verbose = true
 # Fold package directories into single symlinks where possible
 # (GNU stow's "folding"; false = always link individual files). Default: true.
 fold = true
+
+# Packages that must not be folded (default: empty). Use when a single app
+# needs per-file links but you don't want to disable fold globally.
+# fold_ignore = ["my-special-app"]
 
 # Extra glob patterns ignored on top of the built-in GNU Stow 2.4.1 default list.
 # Matched against package-relative paths with globset, e.g. "**/node_modules/**".
@@ -278,10 +286,91 @@ pub struct Stowrc {
   pub warnings: Vec<String>,
 }
 
+/// Expand `~` at the start of a token, and `$VAR` / `${VAR}` anywhere.
+///
+/// A backslash escapes the following character, so `\$HOME` stays the literal
+/// `$HOME`. Unknown env vars stay literal (deliberate deviation from stow,
+/// which aborts — rustow is more forgiving).
 fn expand_tilde_and_vars(s: &str) -> String {
-  shellexpand::full(s)
-    .map(|c| c.into_owned())
-    .unwrap_or_else(|_| shellexpand::tilde(s).into_owned())
+  fn push_tilde(out: &mut String) {
+    if let Some(home) = dirs::home_dir() {
+      out.push_str(&home.to_string_lossy());
+    } else {
+      out.push('~');
+    }
+  }
+
+  let bytes = s.as_bytes();
+  let mut out = String::with_capacity(s.len() + 16);
+  let mut i = 0;
+  while i < bytes.len() {
+    match bytes[i] {
+      b'\\' => {
+        // backslash escapes the next byte, if any
+        if i + 1 < bytes.len() {
+          out.push(bytes[i + 1] as char);
+          i += 2;
+        } else {
+          out.push('\\');
+          i += 1;
+        }
+      }
+      b'$' => {
+        if bytes.get(i + 1) == Some(&b'{') {
+          // ${VAR}
+          let mut j = i + 2;
+          let start = j;
+          while j < bytes.len() && bytes[j] != b'}' {
+            j += 1;
+          }
+          if j >= bytes.len() {
+            // unterminated ${ — literal
+            out.push_str(&s[i..]);
+            return out;
+          }
+          let var = &s[start..j];
+          if var.is_empty() {
+            out.push_str(&s[i..=j]);
+          } else if let Ok(v) = std::env::var(var) {
+            out.push_str(&v);
+          } else {
+            out.push_str(&s[i..=j]);
+          }
+          i = j + 1;
+        } else {
+          // $VAR
+          let mut j = i + 1;
+          while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
+          }
+          if j == i + 1 {
+            out.push('$');
+            i += 1;
+            continue;
+          }
+          let var = &s[i + 1..j];
+          if let Ok(v) = std::env::var(var) {
+            out.push_str(&v);
+          } else {
+            out.push('$');
+            out.push_str(var);
+          }
+          i = j;
+        }
+      }
+      b'~' if i == 0 => {
+        push_tilde(&mut out);
+        i += 1;
+      }
+      _ => {
+        // copy whole UTF-8 codepoint
+        let len = s[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        out.push_str(&s[i..i + len]);
+        i += len;
+      }
+    }
+  }
+  out
 }
 
 /// Parse the contents of a stowrc file (usually `~/.stowrc`).
@@ -666,6 +755,67 @@ mod task3_tests {
   fn stowrc_verbose_zero_is_false() {
     let parsed = parse_stowrc("--verbose=0\n").unwrap();
     assert_eq!(parsed.verbose, Some(false));
+  }
+
+  #[test]
+  fn stowrc_single_backslash_dollar_expands() {
+    let home = std::env::var("HOME").unwrap();
+    // `\\$HOME` in the file -> shellwords consumes the backslash -> `$HOME/...`
+    // -> expand_tilde_and_vars sees `$` not preceded by a backslash -> expands
+    let parsed = parse_stowrc("--dir=\\$HOME/dotfiles/Configs\n").unwrap();
+    assert_eq!(
+      parsed.source,
+      Some(PathBuf::from(format!("{home}/dotfiles/Configs")))
+    );
+  }
+
+  #[test]
+  fn stowrc_double_backslash_dollar_is_literal() {
+    // `\\\\$HOME` in the file -> shellwords emits `\\$HOME` -> `\\$` parsed
+    // as a literal `$`
+    let parsed = parse_stowrc("--dir=\\\\$HOME/dotfiles/Configs\n").unwrap();
+    assert_eq!(
+      parsed.source.as_deref(),
+      Some(std::path::Path::new("$HOME/dotfiles/Configs"))
+    );
+  }
+
+  #[test]
+  fn stowrc_escaped_brace_dollar_is_literal() {
+    let parsed = parse_stowrc("--dir=\\\\${HOME}/dotfiles/Configs\n").unwrap();
+    assert_eq!(
+      parsed.source.as_deref(),
+      Some(std::path::Path::new("${HOME}/dotfiles/Configs"))
+    );
+  }
+
+  #[test]
+  fn stowrc_tilde_expands() {
+    let home = std::env::var("HOME").unwrap();
+    let parsed = parse_stowrc("--dir=~/dotfiles/Configs\n").unwrap();
+    assert_eq!(
+      parsed.source,
+      Some(PathBuf::from(format!("{home}/dotfiles/Configs")))
+    );
+  }
+
+  #[test]
+  fn stowrc_escaped_tilde_is_literal() {
+    let parsed = parse_stowrc("--dir=\\\\~/dotfiles/Configs\n").unwrap();
+    assert_eq!(
+      parsed.source.as_deref(),
+      Some(std::path::Path::new("~/dotfiles/Configs"))
+    );
+  }
+
+  #[test]
+  fn stowrc_brace_form_expands() {
+    let home = std::env::var("HOME").unwrap();
+    let parsed = parse_stowrc("--dir=${HOME}/dotfiles/Configs\n").unwrap();
+    assert_eq!(
+      parsed.source,
+      Some(PathBuf::from(format!("{home}/dotfiles/Configs")))
+    );
   }
 
   #[test]
