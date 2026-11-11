@@ -55,7 +55,7 @@
     "target": {
       "description": "Link destination root; defaults to $HOME.",
       "type": "string",
-      "default": "/home/othman"
+      "default": "$HOME"
     },
     "verbose": {
       "type": "boolean",

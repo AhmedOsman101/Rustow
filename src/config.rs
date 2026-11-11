@@ -58,6 +58,7 @@ pub struct Config {
   pub source: Option<PathBuf>,
   /// Link destination root; defaults to $HOME.
   #[serde(default = "default_target")]
+  #[schemars(default = "default_target_schema")]
   pub target: PathBuf,
   #[serde(default = "default_verbose")]
   pub verbose: bool,
@@ -78,6 +79,11 @@ pub struct Config {
 
 fn default_target() -> PathBuf {
   dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Constant placeholder used only for the *schema*'s `default` (not at runtime).
+fn default_target_schema() -> PathBuf {
+  PathBuf::from("$HOME")
 }
 fn default_verbose() -> bool {
   true
