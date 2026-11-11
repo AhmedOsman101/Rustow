@@ -3,13 +3,64 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach binaries to (default: latest release)"
+        required: false
+        type: string
+  workflow_run:
+    workflows: [Release-plz]
+    types: [completed]
 
 permissions:
   contents: write
 
 jobs:
+  resolve:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    steps:
+      - name: Resolve tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            if [ -z "$TAG" ]; then
+              TAG="$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name)"
+              echo "no tag input given; using latest release: $TAG"
+            fi
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # workflow_run from Release-plz — only build when the latest release is fresh
+          TAG="$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name)"
+          CREATED="$(gh api repos/${{ github.repository }}/releases/latest --jq .created_at)"
+          NOW=$(date -u +%s)
+          THEN=$(date -u -d "$CREATED" +%s)
+          if [ $((NOW - THEN)) -gt 1800 ]; then
+            echo "latest release $TAG was created at $CREATED (>30 min ago) — nothing to build"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build-linux:
     name: Build Linux Binaries
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -35,6 +86,8 @@ jobs:
 
   build-macos:
     name: Build macOS Binaries
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -62,6 +115,8 @@ jobs:
 
   build-windows:
     name: Build Windows Binaries
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -89,7 +144,8 @@ jobs:
 
   upload:
     name: Attach Binaries to Release
-    needs: [build-linux, build-macos, build-windows]
+    needs: [resolve, build-linux, build-macos, build-windows]
+    if: needs.resolve.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download binaries
@@ -105,6 +161,8 @@ jobs:
       - name: Attach to release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          overwrite_files: true
           files: |
             release/rustow-linux-gnu-x64
             release/rustow-linux-gnu-arm64

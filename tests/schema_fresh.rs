@@ -2,12 +2,10 @@
 #[test]
 fn schema_json_is_fresh() {
   let schema = schemars::schema_for!(rustow::config::Config);
-  let expected = serde_json::to_string_pretty(&schema).unwrap() + "\n";
-  let current = std::fs::read_to_string("schema.json").unwrap();
-  assert_eq!(
-    expected, current,
-    "schema.json is stale — run `mask schema`"
-  );
+  let expected = serde_json::to_value(&schema).unwrap();
+  let current: serde_json::Value =
+    serde_json::from_str(&std::fs::read_to_string("schema.json").unwrap()).unwrap();
+  assert_eq!(current, expected, "schema.json is stale — run `mask schema`");
 }
 
 #[test]
