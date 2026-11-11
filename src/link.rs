@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
 use crate::ignore::Ignore;
+use crate::platform;
 
 // ---------------------------------------------------------------- entries
 
@@ -990,7 +991,7 @@ fn apply_link(src: &Path, dst: &Path) -> Result<()> {
       )))
     }
     Err(_) => {
-      std::os::unix::fs::symlink(src, dst).map_err(Error::io(dst))?;
+      platform::symlink(src, dst)?;
       Ok(())
     }
   }
@@ -1235,7 +1236,7 @@ fn try_refold(
     }
   }
   fs::remove_dir(dir).map_err(Error::io(dir))?;
-  std::os::unix::fs::symlink(&package_dir, dir).map_err(Error::io(dir))?;
+  platform::symlink(&package_dir, dir)?;
   Ok(true)
 }
 

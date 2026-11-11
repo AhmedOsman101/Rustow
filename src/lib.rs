@@ -7,3 +7,6 @@ pub mod ignore;
 pub mod link;
 pub mod prompt;
 pub mod status;
+
+/// Platform-specific helpers kept cfg-gated so Windows builds compile too.
+pub mod platform;
