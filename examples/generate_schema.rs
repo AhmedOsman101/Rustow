@@ -13,8 +13,7 @@ fn first_diff(a: &serde_json::Value, b: &serde_json::Value) -> Option<String> {
               return Some(format!("{k}.{d}"));
             }
           }
-          (Some(_), None) => return Some(format!("extra key `{k}` in schema.json")),
-          (None, Some(_)) => return Some(format!("missing key `{k}` in schema.json")),
+          _ => return Some(format!("mismatch at `{k}`")),
         }
       }
       None

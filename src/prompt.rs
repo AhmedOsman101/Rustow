@@ -26,7 +26,7 @@ pub fn confirm_provenance() -> Result<ProvenanceChoice> {
   ];
   let selection = Select::new()
     .with_prompt("rustow")
-    .items(&items)
+    .items(items)
     .default(0)
     .interact()
     .map_err(|e| crate::error::Error::Message(format!("prompt failed: {e}")))?;

@@ -452,7 +452,7 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
     ];
     let choice = dialoguer::Select::new()
       .with_prompt(format!("no source found at {}", src.display()))
-      .items(&items)
+      .items(items)
       .default(0)
       .interact()
       .map_err(|e| Error::Message(format!("prompt failed: {e}")))?;
