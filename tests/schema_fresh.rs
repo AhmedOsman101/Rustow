@@ -5,7 +5,10 @@ fn schema_json_is_fresh() {
   let expected = serde_json::to_value(&schema).unwrap();
   let current: serde_json::Value =
     serde_json::from_str(&std::fs::read_to_string("schema.json").unwrap()).unwrap();
-  assert_eq!(current, expected, "schema.json is stale — run `mask schema`");
+  assert_eq!(
+    current, expected,
+    "schema.json is stale — run `mask schema`"
+  );
 }
 
 #[test]
