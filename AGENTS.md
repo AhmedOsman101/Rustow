@@ -6,7 +6,8 @@
 
 - **Never run rustow, stow, or any filesystem mutation against the real `$HOME`.** Every test runs in a tempdir. The e2e harness uses a fake `$HOME` under `/tmp` inside a podman container. If you need to observe behavior on real dotfiles, ask first — never "just try it", never via a test, never via a script.
 - **Never kill, signal, or reparent processes on this machine.** If a process looks confusing or relevant, ask the user first — they run things interactively and pipeline into pagers; it is usually theirs, not yours.
-- **Read full command output.** No `| tail`, `| head`, or `| grep` to hide what a command printed. Run `mask check` plain and read it. A passing-looking exit code is not proof.
+- **Never filter important commands' output.** Run `cargo`, `mask`, `cargo check`, `cargo test`, and similar commands with NO pipe to `grep`, NO `tail`, NO `head` — read the full output, even when it's long and noisy. If you're tempted because "the errors matter most", stop and print the whole thing anyway. Exit codes are not proof. This rule has been ignored enough times to become a law.
+- **Do not use the Question tool** for any decisions after the user banned it, even when a question seems hard or blocking. Ask in chat prose instead — number questions, give recommendations, wait for answers.
 - **Do not leave stray sessions, hooks, or tests behind** — if you open a pty/server/container, close it, or hand it back cleanly.
 - **Match docs to reality.** Only write what you verified. Never leak session-only coordination (agent-vs-user notes, task assignments) into README, docs/, commit messages, or spec files.
 - **No user-specific examples presented as the norm.** Fixture names go in tests only; docs stay generic. If a user ran a command with their real config, that's their setup, not the product's.
