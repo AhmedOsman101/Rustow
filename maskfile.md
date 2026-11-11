@@ -23,7 +23,9 @@ cargo test
 > Check formatting and lints
 
 ```bash
-cargo fmt --check && cargo clippy --all-targets
+cargo check --quiet
+cargo fmt --check
+cargo clippy --all-targets
 ```
 
 ## format [files]
