@@ -61,7 +61,7 @@ fn link(f: &Fixture, pkgs: &[&str]) {
 fn unlink(f: &Fixture, pkgs: &[&str], dry_run: bool) -> usize {
   let ignore = Ignore::new(&[]).unwrap();
   let pkgs: Vec<String> = pkgs.iter().map(|s| s.to_string()).collect();
-  let plan = plan_unlink(&f.source, &f.target, &pkgs, &ignore).unwrap();
+  let plan = plan_unlink(&f.source, &f.target, &pkgs, &ignore, false).unwrap();
   apply_unlink(&plan, &f.target, &f.source, &ignore, dry_run).unwrap()
 }
 

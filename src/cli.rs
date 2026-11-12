@@ -82,6 +82,9 @@ pub enum Commands {
   /// Unlink all packages in the source directory.
   Reset,
 
+  /// Delete broken rustow-owned symlinks whose target no longer exists.
+  Clean,
+
   /// Create a new package (alias: add).
   #[command(alias = "add")]
   Create {
@@ -283,7 +286,7 @@ impl<'a> App<'a> {
 
   fn unlink_pkgs(&self, pkgs: &[String]) -> Result<i32> {
     let ignore = self.ignore()?;
-    let plan = link::plan_unlink(self.source(), self.target(), pkgs, &ignore)?;
+    let plan = link::plan_unlink(self.source(), self.target(), pkgs, &ignore, false)?;
     let n = link::apply_unlink(
       &plan,
       self.target(),
@@ -437,6 +440,31 @@ pub fn run(cli: Cli) -> Result<i32> {
         return Ok(0);
       }
       app.unlink_pkgs(&pkgs)
+    }
+    Commands::Clean => {
+      let app = App::new(&cli.global)?;
+      let ignore = app.ignore()?;
+      let plan = link::plan_clean(app.source(), app.target(), &ignore)?;
+      let n = link::apply_unlink(
+        &plan,
+        app.target(),
+        app.source(),
+        &ignore,
+        cli.global.dry_run,
+      )?;
+      let verb = if cli.global.dry_run {
+        "would delete"
+      } else {
+        "deleted"
+      };
+      if app.resolved.cfg.verbose || cli.global.verbose > 0 {
+        for action in &plan.actions {
+          let link::UnlinkAction::Unlink { dst } = action;
+          println!("{verb} {}", dst.display());
+        }
+      }
+      println!("{verb} {n} broken link(s)");
+      Ok(0)
     }
     Commands::Relink { pkgs } => {
       let app = App::new(&cli.global)?;

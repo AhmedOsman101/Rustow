@@ -1046,6 +1046,43 @@ pub struct UnlinkPlan {
   pub foreign_skipped: Vec<PathBuf>,
 }
 
+/// Sweep the *target* tree for symlinks pointing into `source` whose
+/// destinations are missing — the stow-style `stow -c`.
+/// Does not touch anything owned by another package or external to `source`.
+pub fn plan_clean(source: &Path, target: &Path, _ignore: &Ignore) -> Result<UnlinkPlan> {
+  let mut plan = UnlinkPlan::default();
+  let mut stack = vec![target.to_path_buf()];
+  while let Some(dir) = stack.pop() {
+    let rd = match fs::read_dir(&dir) {
+      Ok(rd) => rd,
+      Err(_) => continue, // unreadable — leave alone
+    };
+    for entry in rd.flatten() {
+      let path = entry.path();
+      let meta = match entry.file_type() {
+        Ok(t) => t,
+        Err(_) => continue,
+      };
+      if meta.is_symlink() {
+        if let Some(abs) = resolve_symlink(&path)
+          && abs.starts_with(source)
+          && !abs.exists()
+        {
+          plan
+            .actions
+            .push(UnlinkAction::Unlink { dst: path.clone() });
+          if let Some(parent) = path.parent() {
+            plan.candidate_dirs.insert(parent.to_path_buf());
+          }
+        }
+      } else if meta.is_dir() {
+        stack.push(path);
+      }
+    }
+  }
+  Ok(plan)
+}
+
 /// Plan unlinking of `pkgs`: removes symlinks pointing into each package.
 /// Never touches anything not owned by a package. Refold of now link-only
 /// dirs happens at apply time (they are evaluated against the post-unlink
@@ -1055,6 +1092,7 @@ pub fn plan_unlink(
   target: &Path,
   pkgs: &[String],
   ignore: &Ignore,
+  dangling_only: bool,
 ) -> Result<UnlinkPlan> {
   let mut plan = UnlinkPlan::default();
   for pkg in pkgs {
@@ -1063,6 +1101,7 @@ pub fn plan_unlink(
     if !pkg_root.is_dir() {
       return Err(Error::PackageNotFound(pkg.clone()));
     }
+    // walk the package tree; real target dirs get recursed into
     walk_unlink(
       source,
       target,
@@ -1071,11 +1110,13 @@ pub fn plan_unlink(
       Path::new(""),
       ignore,
       &mut plan,
+      dangling_only,
     )?;
   }
   Ok(plan)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_unlink(
   _source: &Path,
   target: &Path,
@@ -1084,6 +1125,7 @@ fn walk_unlink(
   subdir_rel: &Path,
   ignore: &Ignore,
   plan: &mut UnlinkPlan,
+  dangling_only: bool,
 ) -> Result<()> {
   let children: Vec<PathBuf> = match fs::read_dir(subdir_abs) {
     Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
@@ -1106,10 +1148,12 @@ fn walk_unlink(
     match (child.is_dir(), meta) {
       (true, Some(m)) if m.file_type().is_symlink() => {
         if link_points_into(&dst, pkg_root) {
-          plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
-          plan
-            .candidate_dirs
-            .insert(dst.parent().unwrap_or(target).to_path_buf());
+          if !dangling_only || fs::metadata(&dst).is_err() {
+            plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
+            plan
+              .candidate_dirs
+              .insert(dst.parent().unwrap_or(target).to_path_buf());
+          }
         } else {
           plan.foreign_skipped.push(dst);
         }
@@ -1118,15 +1162,24 @@ fn walk_unlink(
         plan.candidate_dirs.insert(dst.clone());
         let child_abs = child.clone();
         walk_unlink(
-          _source, target, pkg_root, &child_abs, &pkg_rel, ignore, plan,
+          _source,
+          target,
+          pkg_root,
+          &child_abs,
+          &pkg_rel,
+          ignore,
+          plan,
+          dangling_only,
         )?;
       }
       (false, Some(m)) if m.file_type().is_symlink() => {
         if link_points_into(&dst, pkg_root) {
-          plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
-          plan
-            .candidate_dirs
-            .insert(dst.parent().unwrap_or(target).to_path_buf());
+          if !dangling_only || fs::metadata(&dst).is_err() {
+            plan.actions.push(UnlinkAction::Unlink { dst: dst.clone() });
+            plan
+              .candidate_dirs
+              .insert(dst.parent().unwrap_or(target).to_path_buf());
+          }
         } else {
           plan.foreign_skipped.push(dst);
         }
