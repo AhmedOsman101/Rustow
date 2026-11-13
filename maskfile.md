@@ -132,11 +132,12 @@ $MASK lint && $MASK test
 > Build linux release binaries into ./bin (needs `cross`); macOS/windows artifacts are built by the Release workflow
 
 **OPTIONS**
-* target
-    * flags: -t --target
-    * type: string
-    * desc: Single rustup target to build (default: all linux targets)
-    * choices: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+
+- target
+  - flags: -t --target
+  - type: string
+  - desc: Single rustup target to build (default: all linux targets)
+  - choices: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
 
 ```bash
 if ! command -v cross &>/dev/null; then

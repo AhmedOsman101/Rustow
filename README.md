@@ -16,14 +16,14 @@ cargo install --path .
 
 Prebuilt binaries are attached to each [GitHub release](https://github.com/AhmedOsman101/Rustow/releases):
 
-| Asset | Platform |
-|---|---|
-| `rustow-linux-gnu-x64` | Linux x86_64 (glibc) |
-| `rustow-linux-gnu-arm64` | Linux aarch64 (glibc) |
-| `rustow-linux-musl-x64` | Linux x86_64 (static musl) |
-| `rustow-linux-musl-arm64` | Linux aarch64 (static musl) |
-| `rustow-macos-x64` / `rustow-macos-arm64` | macOS x86_64 / Apple silicon |
-| `rustow-windows-x64.exe` / `rustow-windows-arm64.exe` | Windows x86_64 / arm64 |
+| Asset                                                 | Platform                     |
+| ----------------------------------------------------- | ---------------------------- |
+| `rustow-linux-gnu-x64`                                | Linux x86_64 (glibc)         |
+| `rustow-linux-gnu-arm64`                              | Linux aarch64 (glibc)        |
+| `rustow-linux-musl-x64`                               | Linux x86_64 (static musl)   |
+| `rustow-linux-musl-arm64`                             | Linux aarch64 (static musl)  |
+| `rustow-macos-x64` / `rustow-macos-arm64`             | macOS x86_64 / Apple silicon |
+| `rustow-windows-x64.exe` / `rustow-windows-arm64.exe` | Windows x86_64 / arm64       |
 
 ## Quickstart
 
@@ -47,17 +47,17 @@ rustow reset             # remove all links
 
 ## Commands
 
-| Command | Description |
-|---|---|
-| `sync` | Link all packages in `source` |
-| `link <pkg>...` | Link specific packages |
-| `unlink <pkg>...` (alias `remove`, `rm`) | Unlink packages |
-| `reset` | Unlink all packages |
-| `relink <pkg>...` | Unlink then re-link (restow) |
-| `status [pkg...]` | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable; `--state linked|partial|unlinked|conflict` to filter (repeatable; applies to `--json` too); `-v` per-issue text detail (capped per package); `-vv` uncapped |
-| `create <app>` (alias `add`) | Create a package, optionally adopting an existing target path |
-| `config default` | Print the annotated default config |
-| `config init` | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one) |
+| Command                                  | Description                                                                                                                |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `sync`                                   | Link all packages in `source`                                                                                              |
+| `link <pkg>...`                          | Link specific packages                                                                                                     |
+| `unlink <pkg>...` (alias `remove`, `rm`) | Unlink packages                                                                                                            |
+| `reset`                                  | Unlink all packages                                                                                                        |
+| `relink <pkg>...`                        | Unlink then re-link (restow)                                                                                               |
+| `status [pkg...]`                        | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable; `--state linked                         | partial | unlinked | conflict`to filter (repeatable; applies to`--json`too);`-v`per-issue text detail (capped per package);`-vv` uncapped |
+| `create <app>` (alias `add`)             | Create a package, optionally adopting an existing target path                                                              |
+| `config default`                         | Print the annotated default config                                                                                         |
+| `config init`                            | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one) |
 
 Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, `--target`.
 
@@ -66,7 +66,7 @@ Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, 
 ## Link semantics
 
 - Package tree mirrors the target root (`$HOME`); `<pkg>/.config/foo/bar` links to `~/.config/foo/bar`.
-- **Folding**: a package directory is replaced by a *single* symlink when the target doesn't exist yet — as long as the subtree contains no ignored paths (e.g. a nested `.git`), in which case it descends per-file.
+- **Folding**: a package directory is replaced by a _single_ symlink when the target doesn't exist yet — as long as the subtree contains no ignored paths (e.g. a nested `.git`), in which case it descends per-file.
 - **Unfolding**: a folded symlink (owned by rustow/stow) colliding with a real directory from another package is split open and both packages re-linked individually.
 - **Refolding** (on unlink): a directory that ends up containing only links into one package is collapsed back into a single symlink.
 - **Idempotent**: re-linking is a no-op for correct links; stale links pointing into the package are replaced; correct links are never re-created.
@@ -75,16 +75,16 @@ Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, 
 
 Conflicts are detected at plan time and resolved **before anything is written**:
 
-| Situation | Default behavior |
-|---|---|
-| Real file at target | TTY: prompt `merge / overwrite / skip` (optionally non-interactive via `on_conflict` / `-f` / `--adopt`). Non-TTY without a flag: abort the whole run, report everything, change nothing |
-| Symlink pointing to exactly the right package path | silently skipped (idempotent) |
-| Dangling symlink pointing into the package | repaired |
-| Symlink into another package | unfolded (dir/dir) or conflict (file/dir) |
-| External symlink or real file (`-f`) | target removed, link created |
-| Existing content (`--adopt`) | target's content moved into the package, then linked |
+| Situation                                          | Default behavior                                                                                                                                                                         |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Real file at target                                | TTY: prompt `merge / overwrite / skip` (optionally non-interactive via `on_conflict` / `-f` / `--adopt`). Non-TTY without a flag: abort the whole run, report everything, change nothing |
+| Symlink pointing to exactly the right package path | silently skipped (idempotent)                                                                                                                                                            |
+| Dangling symlink pointing into the package         | repaired                                                                                                                                                                                 |
+| Symlink into another package                       | unfolded (dir/dir) or conflict (file/dir)                                                                                                                                                |
+| External symlink or real file (`-f`)               | target removed, link created                                                                                                                                                             |
+| Existing content (`--adopt`)                       | target's content moved into the package, then linked                                                                                                                                     |
 
-`merge` opens a diff tool (config `diff_tool` template → PATH-detected registry → `$EDITOR` for plain editors). Reconcile into the **package file**; `rustow` then links the package version onto the target.
+`merge` opens a diff tool (config `diff_tool` template -> PATH-detected registry -> `$EDITOR` for plain editors). Reconcile into the **package file**; `rustow` then links the package version onto the target.
 
 Per-file adoption in bulk: `rustow link --adopt <pkg>` is equivalent to stow's `--adopt`.
 
@@ -114,9 +114,9 @@ rustow create mytool --empty   # create an empty package only
 rustow create mytool --source /path/to/files --path .config/mytool
 ```
 
-- No source found → prompt: create an empty package, or point at another path, or abort.
-- Source found → show what will move (`-v` for the full list), confirm, move, link.
-- Package already exists → merge the source into it (or, with no source to move, offer to link it). Nothing is ever clobbered without `-f`.
+- No source found -> prompt: create an empty package, or point at another path, or abort.
+- Source found -> show what will move (`-v` for the full list), confirm, move, link.
+- Package already exists -> merge the source into it (or, with no source to move, offer to link it). Nothing is ever clobbered without `-f`.
 - `-i` prompts before linking (default: link without asking). `-v` shows the move in detail.
 - Package gets **only** what you give it — `create vim` does not scaffold `.config/<app>` for empty packages.
 
@@ -124,17 +124,17 @@ rustow create mytool --source /path/to/files --path .config/mytool
 
 `~/.config/rustow/config.toml`. All keys optional except `source`:
 
-| Key | Default | Notes |
-|---|---|---|
-| `source` | *(required — no default)* | Stow dir; direct subdirectories are packages |
-| `target` | `$HOME` | Link destination root |
-| `verbose` | `true` | |
-| `fold` | `true` | Fold directories into single symlinks (`false` = GNU Stow's `--no-folding`) |
-| `ignore` | GNU Stow 2.4.1 default list | Glob patterns matched against package-relative paths, added to the built-in list |
-| `diff_tool` | unset | Command template for the merge diff tool, e.g. `"nvim -d {left} {right}"` or `"hx --new {left} {right}"`; wins over registry/$EDITOR |
-| `on_conflict` | `prompt` | `prompt` / `abort` / `skip` / `overwrite` / `adopt` (`prompt` escalates to abort on non-TTY) |
+| Key           | Default                     | Notes                                                                                                                                |
+| ------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `source`      | _(required — no default)_   | Stow dir; direct subdirectories are packages                                                                                         |
+| `target`      | `$HOME`                     | Link destination root                                                                                                                |
+| `verbose`     | `true`                      |                                                                                                                                      |
+| `fold`        | `true`                      | Fold directories into single symlinks (`false` = GNU Stow's `--no-folding`)                                                          |
+| `ignore`      | GNU Stow 2.4.1 default list | Glob patterns matched against package-relative paths, added to the built-in list                                                     |
+| `diff_tool`   | unset                       | Command template for the merge diff tool, e.g. `"nvim -d {left} {right}"` or `"hx --new {left} {right}"`; wins over registry/$EDITOR |
+| `on_conflict` | `prompt`                    | `prompt` / `abort` / `skip` / `overwrite` / `adopt` (`prompt` escalates to abort on non-TTY)                                         |
 
-Precedence: CLI flags → env (`DOTFILES_DIR`, `DOTFILES_TARGET`) → `config.toml` → `~/.stowrc` (fallback only when no config file exists; `$VAR`/`~` expansion).
+Precedence: CLI flags -> env (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback only when no config file exists; `$VAR`/`~` expansion).
 
 Without a config file you'll see a warning naming what's being used instead; on a TTY you can create one pre-filled from the values in use, or silence the notice permanently (`[s]ilence`). `~/.stowrc` is supported for the transition away from GNU Stow.
 

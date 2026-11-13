@@ -9,22 +9,22 @@ A Stow-compatible dotfiles linker in Rust. GNU Stow 2.4.1 does the core job; rus
 The `status` command's design was informed by reading the status implementation of [tuckr](https://github.com/RaphGL/Tuckr); all link semantics come from GNU Stow.
 
 - Source layout: one directory per package under `source` (e.g. `~/dotfiles/Configs/<pkg>/.config/<app>/...`). The package tree mirrors the target root (`$HOME`).
-- `rustow` operates on `$HOME` only when the user explicitly invokes a command. There is no background behavior, no implicit scan-and-fix, and no "live home" guard beyond the normal conflict semantics — that *is* the safety model.
+- `rustow` operates on `$HOME` only when the user explicitly invokes a command. There is no background behavior, no implicit scan-and-fix, and no "live home" guard beyond the normal conflict semantics — that _is_ the safety model.
 - No scripts are modified as part of this work (cutover is the user's manual decision).
 
 ## Commands
 
-| Command | Behavior |
-|---|---|
-| `sync` | Link all packages in `source`. |
-| `link <pkg>...` | Link packages. Args required; no-args is failure. |
-| `unlink <pkg>...` (aliases: `remove`, `rm`) | Unlink packages. Args required; no-args is failure. |
-| `reset` | Unlink all packages. |
-| `relink <pkg>...` | Unlink then link (restow). No-args is failure. Relink-all = `reset && sync`. |
-| `status [pkg...]` | Per-package table; filters by name. `-s\|--short` prints only the summary line; `--json` machine-readable output. `-v` prints per-issue text detail (20 issues per package max); `-vv` prints everything. Exit 0 iff all inspected packages are fully linked and conflict-free, else 1. `-s` and `-v` are mutually exclusive. |
-| `create <app>` (alias: `add`) | See "create workflow" below. |
-| `config default` | Print the annotated default config to stdout. |
-| `config init` | Write the default config to `$XDG_CONFIG_HOME/rustow/config.toml` (default `~/.config/rustow/config.toml`). Can pre-fill from an existing `.stowrc`/env when run interactively via the provenance prompt. |
+| Command                                     | Behavior                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync`                                      | Link all packages in `source`.                                                                                                                                                                                                                                                                                                |
+| `link <pkg>...`                             | Link packages. Args required; no-args is failure.                                                                                                                                                                                                                                                                             |
+| `unlink <pkg>...` (aliases: `remove`, `rm`) | Unlink packages. Args required; no-args is failure.                                                                                                                                                                                                                                                                           |
+| `reset`                                     | Unlink all packages.                                                                                                                                                                                                                                                                                                          |
+| `relink <pkg>...`                           | Unlink then link (restow). No-args is failure. Relink-all = `reset && sync`.                                                                                                                                                                                                                                                  |
+| `status [pkg...]`                           | Per-package table; filters by name. `-s\|--short` prints only the summary line; `--json` machine-readable output. `-v` prints per-issue text detail (20 issues per package max); `-vv` prints everything. Exit 0 iff all inspected packages are fully linked and conflict-free, else 1. `-s` and `-v` are mutually exclusive. |
+| `create <app>` (alias: `add`)               | See "create workflow" below.                                                                                                                                                                                                                                                                                                  |
+| `config default`                            | Print the annotated default config to stdout.                                                                                                                                                                                                                                                                                 |
+| `config init`                               | Write the default config to `$XDG_CONFIG_HOME/rustow/config.toml` (default `~/.config/rustow/config.toml`). Can pre-fill from an existing `.stowrc`/env when run interactively via the provenance prompt.                                                                                                                     |
 
 Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`.
 
@@ -43,18 +43,18 @@ GNU Stow-compatible subset, not a full clone:
 ## Conflict handling
 
 - Resolution is **two-phase** (plan everything, then apply): any unresolved conflict aborts the whole run; nothing is changed; all conflicts are reported.
-- Existing **real file** at a target path, on a TTY → prompt `[m]erge / [o]verwrite / [s]kip`:
-  - **Merge**: open both files in a diff tool (see "diff tools" below). The user reconciles the two files starting from the *package* copy (they edit the package file until it is the desired merged state). On Enter, the package file is left as-is and the target becomes a symlink to it.
+- Existing **real file** at a target path, on a TTY -> prompt `[m]erge / [o]verwrite / [s]kip`:
+  - **Merge**: open both files in a diff tool (see "diff tools" below). The user reconciles the two files starting from the _package_ copy (they edit the package file until it is the desired merged state). On Enter, the package file is left as-is and the target becomes a symlink to it.
   - **Overwrite**: target is deleted; symlink to the package's file created.
   - **Skip**: target untouched; package file reported as not linked.
 - `-f|--force`: skip prompting; package wins (target deleted, symlink created). (Stow `--override`.)
-- `--adopt`: skip prompting; target's content is moved *into the package* (package copy replaced by the target's content), target becomes a symlink. (Stow `--adopt`.)
+- `--adopt`: skip prompting; target's content is moved _into the package_ (package copy replaced by the target's content), target becomes a symlink. (Stow `--adopt`.)
 - Non-TTY with neither flag, or unresolved after prompting: abort the whole run two-phase; report; change nothing.
 - Existing **symlink** at target path:
-  - Points at exactly the wanted package path → silently skip (idempotent).
-  - Dangling, points into this package → replace (repair).
-  - Points into another package: directory-vs-directory → unfold both; otherwise treat as conflict (prompt `[o]verwrite / [s]kip`; no merge).
-  - Points anywhere else (external/absolute) → same prompt as files minus merge.
+  - Points at exactly the wanted package path -> silently skip (idempotent).
+  - Dangling, points into this package -> replace (repair).
+  - Points into another package: directory-vs-directory -> unfold both; otherwise treat as conflict (prompt `[o]verwrite / [s]kip`; no merge).
+  - Points anywhere else (external/absolute) -> same prompt as files minus merge.
 
 ## status output
 
@@ -62,7 +62,7 @@ Table with columns `Package | Status | Notes`:
 
 - `Status`: `linked` | `partial` | `unlinked` | `conflict` (folded links count all subtree leaves as linked).
 - `Notes`: e.g. `3 not linked`, `2 conflicts`, `empty package`, or a short reason.
-- No positional args → all packages; package names → filter.
+- No positional args -> all packages; package names -> filter.
 - `-s|--short`: print only the summary line.
 - `--json`: `{ "packages": [...], "summary": {...} }`.
 - Exit 0 iff every inspected package is `linked` and conflict-free; else 1.
@@ -71,22 +71,23 @@ Table with columns `Package | Status | Notes`:
 
 `~/.config/rustow/config.toml` (i.e. `$XDG_CONFIG_HOME/rustow/config.toml`). Keys (all optional except `source`):
 
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `source` | string | **none — error out until set** (Q1 answer: no default) | The stow dir; packages are its direct subdirectories. |
-| `target` | string | `$HOME` | Link destination root. |
-| `verbose` | bool | `true` | |
-| `fold` | bool | `true` | Clearer name for stow's `--no-folding` toggle. |
-| `ignore` | list of glob | GNU Stow 2.4.1's default ignore list | Added on top of the built-in list; matched against package-relative paths. The complete built-in default is present as the default value in the printed/initialized config. |
-| `diff_tool` | string (command template) | unset | `{left}` / `{right}` placeholders, shlex-parsed. **Wins** over the registry and `$EDITOR`. |
-| `on_conflict` | string | `prompt` | `prompt` (TTY) / `abort` / `skip` / `overwrite` / `adopt`. `prompt` escalates to `abort` when not a TTY. |
+| Key           | Type                      | Default                                                | Notes                                                                                                                                                                       |
+| ------------- | ------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source`      | string                    | **none — error out until set** (Q1 answer: no default) | The stow dir; packages are its direct subdirectories.                                                                                                                       |
+| `target`      | string                    | `$HOME`                                                | Link destination root.                                                                                                                                                      |
+| `verbose`     | bool                      | `true`                                                 |                                                                                                                                                                             |
+| `fold`        | bool                      | `true`                                                 | Clearer name for stow's `--no-folding` toggle.                                                                                                                              |
+| `ignore`      | list of glob              | GNU Stow 2.4.1's default ignore list                   | Added on top of the built-in list; matched against package-relative paths. The complete built-in default is present as the default value in the printed/initialized config. |
+| `diff_tool`   | string (command template) | unset                                                  | `{left}` / `{right}` placeholders, shlex-parsed. **Wins** over the registry and `$EDITOR`.                                                                                  |
+| `on_conflict` | string                    | `prompt`                                               | `prompt` (TTY) / `abort` / `skip` / `overwrite` / `adopt`. `prompt` escalates to `abort` when not a TTY.                                                                    |
 
-**Precedence**: CLI flags → env vars (`DOTFILES_DIR`, `DOTFILES_TARGET`) → `config.toml` → `~/.stowrc` (fallback **only** when no config.toml exists; supports `$VAR`/`${VAR}` expansion and `--dir`/`--target`/`--verbose`; `--ignore` not supported from stowrc).
+**Precedence**: CLI flags -> env vars (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback **only** when no config.toml exists; supports `$VAR`/`${VAR}` expansion and `--dir`/`--target`/`--verbose`; `--ignore` not supported from stowrc).
 
 **Provenance prompt** (when no `config.toml`):
+
 - TTY: warning naming what's used instead (`~/.stowrc` fallback, or env vars) + prompt: `[c]reate config.toml now (pre-filled from current values) / [k]eep fallback for this run / [s]ilence permanently / [a]bort?`
 - Non-TTY: stderr warning; proceed.
-- Config exists → completely silent.
+- Config exists -> completely silent.
 - `[s]ilence permanently` writes a stamp file under `$XDG_CACHE_HOME/rustow/` (or `~/.cache/rustow/`); suppresses the prompt until a `config.toml` exists.
 
 **Default config & schema**: `config default` prints the annotated default (including the complete stow default ignore list as its `ignore` value). `schema.json` is auto-generated at the repo root from the config struct (schemars); regenerated via mask task, checked in.
@@ -99,11 +100,11 @@ Table with columns `Package | Status | Notes`:
 
 - `<relpath>`: path relative to `target`; the package mirrors it 1:1 (`<source>/<app>/<relpath>`). Default: `.config/<app>`. Set with `--path`.
 - **New package, no source found** (nothing at `target/<relpath>`): prompt — `[e]mpty package` (create only `<source>/<app>`, completely empty, and stop) / supply a source path to move in / abort.
-- **Source exists** at `target/<relpath>`: show the source → destination mapping (with `--verbose`: full file list + sizes), confirm, move it into the package, then link. Uses Rust prompts (dialoguer-style), no gum.
+- **Source exists** at `target/<relpath>`: show the source -> destination mapping (with `--verbose`: full file list + sizes), confirm, move it into the package, then link. Uses Rust prompts (dialoguer-style), no gum.
 - **Package dir already exists**: never clobber; report what's there; offer to link it or abort.
 - After moving, link the package by default; `-i|--interactive` asks before linking.
 - Non-interactive: requires `--empty` or `--source <path>` (for the move path), plus `--yes` to skip confirmations; `--path` for custom layouts; `--verbose` for the file list.
-- Layout example: `create vim` → `<source>/vim/.config/vim/...`; `create zsh --path .zshrc` → `<source>/zsh/.zshrc`.
+- Layout example: `create vim` -> `<source>/vim/.config/vim/...`; `create zsh --path .zshrc` -> `<source>/zsh/.zshrc`.
 
 ## Ignore handling
 
@@ -118,7 +119,7 @@ Resolution order (first wins):
 1. `diff_tool` in `config.toml` — full command template over `{left}`/`{right}`, shlex-parsed.
 2. Built-in registry, filtered by PATH availability, interactive pick on TTY, cached in `$XDG_CACHE_HOME/rustow/diff-tool` (override with `XDG_CACHE_HOME`). Persisted selection reused while it still exists on PATH.
 3. `$EDITOR file{left} file{right}` — opens both as buffers; user resolves manually (for editors without diff). No parsing of $EDITOR flags beyond shlex splitting... (note: `$EDITOR` may contain args; shlex-split `$EDITOR; append both files`).
-4. None of the above → error telling the user to set `diff_tool` or `$EDITOR`.
+4. None of the above -> error telling the user to set `diff_tool` or `$EDITOR`.
 
 Registry (name, command template, blocks-until-done):
 
@@ -138,9 +139,9 @@ Registry (name, command template, blocks-until-done):
 - Pager-like, non-blocking-into-less semantics: `colordiff -u {left} {right}`, `delta {left} {right}`, `diff -u --color=always {left} {right}`
 - Helix deliberately absent (no two-file diff mode) — use `diff_tool = "hx --new {left} {right}"` if wanted.
 
-Merge UX (real-file conflict, user picks `m`): message explaining they should edit the **package** copy to the merged state; open diff tool on (target, package file); on tool exit or Enter, symlink target → package file. If the user cancels/backs out of the prompt without choosing, that file is skipped (conflict remains).
+Merge UX (real-file conflict, user picks `m`): message explaining they should edit the **package** copy to the merged state; open diff tool on (target, package file); on tool exit or Enter, symlink target -> package file. If the user cancels/backs out of the prompt without choosing, that file is skipped (conflict remains).
 
-## Config key → flag mapping (useful defaults promoted)
+## Config key -> flag mapping (useful defaults promoted)
 
 `verbose`/`fold`/`ignore`/`target`/`source`/`diff_tool`/`on_conflict` — that is the complete key list; no other flags are promoted.
 
@@ -149,7 +150,7 @@ Merge UX (real-file conflict, user picks `m`): message explaining they should ed
 Single crate, lib + thin bin:
 
 - `src/lib.rs` — module wiring for integration tests
-- `src/main.rs` — arg parsing → dispatch → exit codes
+- `src/main.rs` — arg parsing -> dispatch -> exit codes
 - `src/cli.rs` — clap types
 - `src/config.rs` — config model, precedence, stowrc fallback, provenance prompt
 - `src/ignore.rs` — built-in stow list + glob user ignores

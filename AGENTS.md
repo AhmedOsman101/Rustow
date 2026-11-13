@@ -20,7 +20,7 @@
 - Workflows under `.github/workflows/`: `ci.yml` (push/PR to main — `mask lint` + `mask schema check` + `mask test`, with `mask` via `taiki-e/install-action@v2`), `release-plz.yml`, `release.yml`, `dependabot-auto-merge.yml`.
 - Releases are release-plz driven: conventional commits on `main` open a release PR (version bump + changelog); merging it cuts the tag + GitHub release; `release.yml` then builds and attaches binaries (linux gnu/musl × x64/arm64 via `cross`, macOS ×2 on `macos-latest`, windows ×2 on `windows-latest`).
 - `publish = false` — no crates.io; releases are GitHub releases with `rustow-<os>-<libc|msvc>-<arch>` assets.
-- Repo settings (already enabled): Actions workflow permissions allow GitHub Actions to create and approve PRs; Settings → General → Features → Allow auto-merge (required by the dependabot auto-merge workflow).
+- Repo settings (already enabled): Actions workflow permissions allow GitHub Actions to create and approve PRs; Settings -> General -> Features -> Allow auto-merge (required by the dependabot auto-merge workflow).
 - Linux binaries are the only thing `mask release` builds locally; macOS/windows binaries exist only on the release assets.
 
 ## Commands (mask is the task runner — use it, not raw cargo)
@@ -49,11 +49,11 @@ Always `mask format` before committing — otherwise the pre-commit hook (`.husk
 
 Behavior to know:
 
-- Fold = whole package dir → one symlink, but only over subtrees with no ignored paths (nested `.git` stays unlinked); unfold = split open a rustow/stow-owned fold colliding with another package; refold = collapse link-only dirs on unlink.
+- Fold = whole package dir -> one symlink, but only over subtrees with no ignored paths (nested `.git` stays unlinked); unfold = split open a rustow/stow-owned fold colliding with another package; refold = collapse link-only dirs on unlink.
 - Two-phase conflicts: nothing mutates until every conflict resolves (`merge`/`overwrite`/`skip`, or `-f`/`--adopt`); non-TTY without a flag aborts the entire run.
 - Config precedence: CLI flags > env (`DOTFILES_DIR`, `DOTFILES_TARGET`) > `config.toml` > `~/.stowrc` (stowrc only when no config.toml). `source` has no default — error out until set.
 - tabled is used with default-features off + `features = ["ansi"]` (derive dropped to avoid `proc-macro-error2`; color width is ANSI-aware).
-- `status` exit code: 0 iff all inspected packages fully linked (unlinked/partial/conflict → 1).
+- `status` exit code: 0 iff all inspected packages fully linked (unlinked/partial/conflict -> 1).
 
 ## Tests
 
