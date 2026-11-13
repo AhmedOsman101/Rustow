@@ -81,7 +81,7 @@ Table with columns `Package | Status | Notes`:
 | `diff_tool`   | string (command template) | unset                                                  | `{left}` / `{right}` placeholders, shlex-parsed. **Wins** over the registry and `$EDITOR`.                                                                                  |
 | `on_conflict` | string                    | `prompt`                                               | `prompt` (TTY) / `abort` / `skip` / `overwrite` / `adopt`. `prompt` escalates to `abort` when not a TTY.                                                                    |
 
-**Precedence**: CLI flags -> env vars (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback **only** when no config.toml exists; supports `$VAR`/`${VAR}` expansion and `--dir`/`--target`/`--verbose`; `--ignore` not supported from stowrc).
+**Precedence**: CLI flags -> env vars (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback **only** when no config.toml exists; supports `$VAR`/`${VAR}` expansion and `--dir`/`--target`/`--verbose`; `--ignore` not supported from stowrc). The stowrc fallback can be disabled entirely with `--no-stowrc` or `RUSTOW_NO_STOWRC=1` (then running with no config and no env vars fails with the source-not-set guidance, as if no stowrc existed).
 
 **Provenance prompt** (when no `config.toml`):
 
@@ -144,6 +144,14 @@ Merge UX (real-file conflict, user picks `m`): message explaining they should ed
 ## Config key -> flag mapping (useful defaults promoted)
 
 `verbose`/`fold`/`ignore`/`target`/`source`/`diff_tool`/`on_conflict` — that is the complete key list; no other flags are promoted.
+
+## Exit codes
+
+As implemented (and now relied on by scripts):
+
+- `0` — success; for `status`, every inspected package is fully linked.
+- `1` — conflicts, status health failure, or any other error (printed to stderr).
+- `2` — user aborted (e.g. answered "abort" at a conflict prompt).
 
 ## Implementation layout
 

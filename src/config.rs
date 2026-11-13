@@ -473,6 +473,17 @@ pub fn parse_stowrc(contents: &str) -> Result<Stowrc> {
 pub struct CliOverrides {
   pub dir: Option<PathBuf>,
   pub target: Option<PathBuf>,
+  /// `--no-stowrc` / `RUSTOW_NO_STOWRC`: never read `~/.stowrc`, even as the fallback.
+  pub no_stowrc: bool,
+}
+
+/// Environment kill-switch for the `~/.stowrc` fallback.
+/// Truthy: 1, true, yes, on (case-insensitive). Everything else is false.
+fn env_no_stowrc() -> bool {
+  match std::env::var("RUSTOW_NO_STOWRC") {
+    Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+    Err(_) => false,
+  }
 }
 
 /// The fully resolved configuration plus its provenance.
@@ -508,9 +519,16 @@ pub fn resolve(cli: &CliOverrides) -> Result<ResolvedConfig> {
   }
 
   // 2b. stowrc — only when no config file exists (env wins over it; spec: stowrc is a fallback)
+  let stowrc_ignored = cli.no_stowrc || env_no_stowrc();
   if file_cfg.is_none() && source.is_none() {
     let stowrc = stowrc_path();
-    if stowrc.exists() {
+    if stowrc_ignored && stowrc.exists() {
+      eprintln!(
+        "rustow: note: ignoring {} (disabled by --no-stowrc / RUSTOW_NO_STOWRC)",
+        stowrc.display()
+      );
+    }
+    if !stowrc_ignored && stowrc.exists() {
       let contents = fs::read_to_string(&stowrc).map_err(Error::io(&stowrc))?;
       let parsed = parse_stowrc(&contents)?;
       for w in parsed.warnings {
@@ -549,6 +567,12 @@ pub fn resolve(cli: &CliOverrides) -> Result<ResolvedConfig> {
   )));
 
   let source = source.ok_or(Error::SourceNotSet)?;
+  if source == target {
+    return Err(Error::Message(format!(
+      "source and target are the same directory ({}); refusing to link a package tree onto itself",
+      source.display()
+    )));
+  }
   Ok(ResolvedConfig {
     cfg,
     source,

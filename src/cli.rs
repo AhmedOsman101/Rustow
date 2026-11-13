@@ -46,6 +46,11 @@ pub struct GlobalArgs {
   #[arg(short, long, global = true, action = clap::ArgAction::Count)]
   pub verbose: u8,
 
+  /// Never read ~/.stowrc, even when no config file exists (overrides the fallback;
+  /// can also be set with RUSTOW_NO_STOWRC=1).
+  #[arg(long, global = true)]
+  pub no_stowrc: bool,
+
   /// Stow directory (source of packages); overrides config/env/stowrc.
   #[arg(long, global = true, value_name = "DIR")]
   pub dir: Option<PathBuf>,
@@ -194,6 +199,7 @@ impl<'a> App<'a> {
     let resolved = config::resolve(&CliOverrides {
       dir: globals.dir.clone(),
       target: globals.target.clone(),
+      no_stowrc: globals.no_stowrc,
     })?;
     config::notice(&resolved)?;
     Ok(Self { globals, resolved })

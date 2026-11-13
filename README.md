@@ -134,7 +134,7 @@ rustow create mytool --source /path/to/files --path .config/mytool
 | `diff_tool`   | unset                       | Command template for the merge diff tool, e.g. `"nvim -d {left} {right}"` or `"hx --new {left} {right}"`; wins over registry/$EDITOR |
 | `on_conflict` | `prompt`                    | `prompt` / `abort` / `skip` / `overwrite` / `adopt` (`prompt` escalates to abort on non-TTY)                                         |
 
-Precedence: CLI flags -> env (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback only when no config file exists; `$VAR`/`~` expansion).
+Precedence: CLI flags -> env (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback only when no config file exists; `$VAR`/`~` expansion). `--no-stowrc` or `RUSTOW_NO_STOWRC=1` disables the `~/.stowrc` fallback completely.
 
 Without a config file you'll see a warning naming what's being used instead; on a TTY you can create one pre-filled from the values in use, or silence the notice permanently (`[s]ilence`). `~/.stowrc` is supported for the transition away from GNU Stow.
 
