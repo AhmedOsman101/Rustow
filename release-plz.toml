@@ -1,4 +1,10 @@
 [workspace]
-publish = false
-git_release_enable = true
 changelog_update = true
+git_only = true
+git_release_enable = true
+git_release_generate_notes = true
+git_tag_enable = true
+pr_branch_prefix = "release-plz/"
+pr_draft = true
+publish = false
+repo_url = "https://github.com/AhmedOsman101/Rustow"
