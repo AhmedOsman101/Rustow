@@ -165,3 +165,81 @@ for triple in "${target_list[@]}"; do
   cp "target/${triple}/release/rustow" "bin/${out}"
 done
 ```
+
+### pr [args]
+
+> Create a release PR using release-plz
+
+**OPTIONS**
+
+- version
+  - flags: --release-as
+  - type: string
+  - desc: Set the version for the next release
+
+```bash
+declare -a argv
+eval 'argv=(${args})'
+remote="$(git remote get-url origin)"
+repoUrl="${remote/git@github.com:/https://github.com/}.git"
+
+if [[ -n "${version}" && "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  release-plz set-version "${version}"
+fi
+
+release-plz release-pr \
+  --repo-url="${repoUrl}" \
+  --git-token="${GITHUB_TOKEN:-token-missing}" \
+  --config="release-plz.toml" \
+  "${argv[@]}"
+```
+
+### gh [args]
+
+> Create a release PR using release-plz
+
+**OPTIONS**
+
+- force
+  - flags: -f --force
+  - type: boolean
+  - desc: Force release or not
+
+```bash
+declare -a argv
+eval 'argv=(${args})'
+remote="$(git remote get-url origin)"
+repoUrl="${remote/git@github.com:/https://github.com/}.git"
+
+if [[ "${force}" == "true" ]]; then
+  # Force release: create tag, then create release (triggers workflow)
+  VERSION="$(cargo pkgid | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
+  TAG_NAME="v${VERSION}"
+
+  echo "Force releasing v${VERSION}..."
+
+  # Delete old tag if exists (in case of re-release)
+  git push origin ":refs/tags/${TAG_NAME}" 2>/dev/null || true
+
+  # Create and push tag
+  git tag -f "${TAG_NAME}"
+  git push origin "${TAG_NAME}" --force
+
+  # Wait for git operations to settle
+  sleep 3
+
+  # Create release using gh - this triggers the workflow via 'release: published'
+  gh release create "${TAG_NAME}" \
+    --title "Release ${TAG_NAME}" \
+    --generate-notes \
+    --target main
+
+  echo "Release created! Binaries will be built and uploaded automatically."
+else
+  release-plz release \
+  --repo-url="${repoUrl}" \
+  --git-token="${GITHUB_TOKEN:-token-missing}" \
+  --config="release-plz.toml" \
+    "${argv[@]}"
+fi
+```
