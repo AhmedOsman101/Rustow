@@ -1,6 +1,6 @@
 [package]
 name = "rustow"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "A Stow-compatible dotfiles linker written in Rust, with modern UX"
 license = "GPL-2.0-or-later"
