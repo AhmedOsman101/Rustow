@@ -157,6 +157,15 @@ impl StatusFilter {
         | (StatusFilter::Conflict, K::Conflict)
     )
   }
+
+  fn name(self) -> &'static str {
+    match self {
+      StatusFilter::Linked => "linked",
+      StatusFilter::Partial => "partial",
+      StatusFilter::Unlinked => "unlinked",
+      StatusFilter::Conflict => "conflict",
+    }
+  }
 }
 
 #[derive(Debug, Subcommand)]
@@ -523,10 +532,25 @@ pub fn run(cli: Cli) -> Result<i32> {
         pkgs
       };
       let mut packages = crate::status::compute_many(app.source(), app.target(), &pkgs, &ignore)?;
+      let had_packages = !packages.is_empty();
       if !states.is_empty() {
         packages.retain(|p| states.iter().any(|s| s.matches(p.status)));
       }
       let code = crate::status::exit_code(&packages);
+      if packages.is_empty() && !json {
+        // nothing to show: print one plain line instead of an empty table
+        if had_packages && !states.is_empty() {
+          let names = states
+            .iter()
+            .map(|s| s.name())
+            .collect::<Vec<_>>()
+            .join("|");
+          println!("no packages match --state {names}");
+        } else {
+          println!("no packages found in {}", app.source().display());
+        }
+        return Ok(code);
+      }
       if short {
         println!(
           "{}",

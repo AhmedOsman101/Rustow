@@ -307,3 +307,44 @@ fn status_short_and_verbose_conflict() {
   make_pkg(&r.source, "zsh", &[".zshrc"]);
   r.cmd().args(["status", "-s", "-v"]).assert().failure();
 }
+
+#[test]
+fn status_state_filter_with_no_match_prints_message_not_table() {
+  let r = rig();
+  make_pkg(&r.source, "zsh", &[".zshrc"]);
+  r.cmd().args(["link", "zsh"]).assert().success();
+  // nothing is partial: the filter empties the list
+  let out = r
+    .cmd()
+    .args(["status", "--state", "partial"])
+    .assert()
+    .success();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("no packages match --state partial"));
+  assert!(!text.contains("╭"));
+}
+
+#[test]
+fn status_state_filter_with_no_match_json_stays_valid() {
+  let r = rig();
+  make_pkg(&r.source, "zsh", &[".zshrc"]);
+  r.cmd().args(["link", "zsh"]).assert().success();
+  let out = r
+    .cmd()
+    .args(["status", "--state", "partial", "--json"])
+    .assert()
+    .success();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+  assert_eq!(parsed["packages"].as_array().unwrap().len(), 0);
+  assert!(!text.contains("no packages match"));
+}
+
+#[test]
+fn status_empty_source_prints_message_not_table() {
+  let r = rig();
+  let out = r.cmd().args(["status"]).assert().success();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("no packages found"));
+  assert!(!text.contains("╭"));
+}
