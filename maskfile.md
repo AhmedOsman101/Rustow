@@ -168,7 +168,7 @@ done
 
 ### pr [args]
 
-> Create a release PR using release-plz
+> Create a release PR using release-please
 
 **OPTIONS**
 
@@ -184,23 +184,23 @@ remote="$(git remote get-url origin)"
 repoUrl="${remote/git@github.com:/https://github.com/}.git"
 
 if [[ -n "${version}" && "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  release-plz set-version "${version}"
+  git commit --allow-empty --no-verify -m "chore: release ${version}" -m "Release-As: ${version}"
 fi
 
-release-plz release-pr \
+release-please release-pr \
   --repo-url="${repoUrl}" \
-  --git-token="${GITHUB_TOKEN:-token-missing}" \
-  --config="release-plz.toml" \
+  --token="${GITHUB_TOKEN:-token-missing}" \
+  --config-file="release-please-config.json" \
   "${argv[@]}"
 ```
 
 ### gh [args]
 
-> Create a release PR using release-plz
+> Create a release PR using release-please
 
 **OPTIONS**
 
-- force
+- FORCE
   - flags: -f --force
   - type: boolean
   - desc: Force release or not
@@ -211,7 +211,7 @@ eval 'argv=(${args})'
 remote="$(git remote get-url origin)"
 repoUrl="${remote/git@github.com:/https://github.com/}.git"
 
-if [[ "${force}" == "true" ]]; then
+if [[ "${FORCE}" == "true" ]]; then
   # Force release: create tag, then create release (triggers workflow)
   VERSION="$(cargo pkgid | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')"
   TAG_NAME="v${VERSION}"
@@ -236,10 +236,10 @@ if [[ "${force}" == "true" ]]; then
 
   echo "Release created! Binaries will be built and uploaded automatically."
 else
-  release-plz release \
-  --repo-url="${repoUrl}" \
-  --git-token="${GITHUB_TOKEN:-token-missing}" \
-  --config="release-plz.toml" \
+  release-please github-release \
+    --repo-url="${repoUrl}" \
+    --token="${GITHUB_TOKEN:-token-missing}" \
+    --config-file="release-please-config.json" \
     "${argv[@]}"
 fi
 ```

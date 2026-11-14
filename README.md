@@ -170,6 +170,6 @@ mask release      # cross-build linux release binaries into ./bin (needs `cross`
 mask install      # cargo install --path .
 ```
 
-Releases are automated with [release-plz](https://github.com/release-plz/release-plz): merged conventional commits on `main` open a release PR (version bump + changelog); merging it cuts a GitHub release, and the Release workflow attaches cross-built binaries.
+Releases are automated with [release-please](https://github.com/googleapis/release-please): merged conventional commits on `main` open a release PR (version bump + changelog); merging it cuts a GitHub release, and the Release workflow attaches cross-built binaries.
 
 License: GPL-2.0-or-later (see [LICENSE](./LICENSE)).

@@ -17,8 +17,8 @@
 
 ## CI & releases
 
-- Workflows under `.github/workflows/`: `ci.yml` (push/PR to main — `mask lint` + `mask schema check` + `mask test`, with `mask` via `taiki-e/install-action@v2`), `release-plz.yml`, `release.yml`, `dependabot-auto-merge.yml`.
-- Releases are release-plz driven: conventional commits on `main` open a release PR (version bump + changelog); merging it cuts the tag + GitHub release; `release.yml` then builds and attaches binaries (linux gnu/musl × x64/arm64 via `cross`, macOS ×2 on `macos-latest`, windows ×2 on `windows-latest`).
+- Workflows under `.github/workflows/`: `ci.yml` (push/PR to main — `mask lint` + `mask schema check` + `mask test`, with `mask` via `taiki-e/install-action@v2`), `release-please.yml`, `release.yml`, `dependabot-auto-merge.yml`.
+- Releases are release-please driven: conventional commits on `main` open a release PR (version bump + changelog); merging it cuts the tag + GitHub release; `release.yml` then builds and attaches binaries (linux gnu/musl × x64/arm64 via `cross`, macOS ×2 on `macos-latest`, windows ×2 on `windows-latest`).
 - `publish = false` — no crates.io; releases are GitHub releases with `rustow-<os>-<libc|msvc>-<arch>` assets.
 - Repo settings (already enabled): Actions workflow permissions allow GitHub Actions to create and approve PRs; Settings -> General -> Features -> Allow auto-merge (required by the dependabot auto-merge workflow).
 - Linux binaries are the only thing `mask release` builds locally; macOS/windows binaries exist only on the release assets.
