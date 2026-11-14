@@ -11,7 +11,7 @@ GNU Stow does the core job well; `rustow` replaces it for one workflow: one dire
 ## Install
 
 ```sh
-cargo install --path .
+cargo install rustow --git https://github.com/AhmedOsman101/rustow
 ```
 
 Prebuilt binaries are attached to each [GitHub release](https://github.com/AhmedOsman101/Rustow/releases):
