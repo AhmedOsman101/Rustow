@@ -2,30 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.3](https://github.com/AhmedOsman101/Rustow/compare/rustow-v0.1.2...rustow-v0.1.3) (2026-11-14)
+
+### Bug Fixes
+
+- **status:** print a plain message instead of an empty table when nothing matches ([882e937](https://github.com/AhmedOsman101/Rustow/commit/882e937be3d78834e4d3a6063cde9c37206311d1))
+
 ## [0.1.2] - 2026-11-13
 
 ### Added
 
-- *(release)* add release-pr and gh release tasks to maskfile
-- *(config)* add --no-stowrc kill switch, RUSTOW_NO_STOWRC env var, and source==target refusal
-- *(clean)* delete broken rustow-owned symlinks
-- *(fold-ignore)* per-package fold opt-out via config fold_ignore key
+- _(release)_ add release-pr and gh release tasks to maskfile
+- _(config)_ add --no-stowrc kill switch, RUSTOW_NO_STOWRC env var, and source==target refusal
+- _(clean)_ delete broken rustow-owned symlinks
+- _(fold-ignore)_ per-package fold opt-out via config fold_ignore key
 
 ### Fixed
 
-- *(platform)* make the crate build on Windows (symlink_file/symlink_dir)
+- _(platform)_ make the crate build on Windows (symlink_file/symlink_dir)
 
 ### Other
 
 - update release-plz configuration for automated releases
-- *(reports)* rewrite V1 coverage report
-- *(edge-cases)* non-ASCII paths, fold=false, stowrc opt-out, source==target, clean idempotency
+- _(reports)_ rewrite V1 coverage report
+- _(edge-cases)_ non-ASCII paths, fold=false, stowrc opt-out, source==target, clean idempotency
 - update 7 files 2026-11-13@07:50pm
 - update maskfile.md 2026-11-12@01:59am
 - add hard rule banning command-output filtering; add question-tool ban
 - add V1 coverage report
-- *(release)* only build on release-plz merge or manual dispatch
-- *(actions)* bump checkout to v7, upload-artifact to v7, download-artifact to v8
+- _(release)_ only build on release-plz merge or manual dispatch
+- _(actions)_ bump checkout to v7, upload-artifact to v7, download-artifact to v8
 
 ## [0.1.1](https://github.com/AhmedOsman101/Rustow/compare/v0.1.0...v0.1.1) - 2026-11-11
 
