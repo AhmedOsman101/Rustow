@@ -1,0 +1,6 @@
+# ADR 0008: Profiles, host-conditional deployment, and templating are future work
+
+- **Status:** Accepted (2026-11-16)
+- **Context:** tuckr offers "profiles" and host-conditional package selection; chezmoi offers Go-templated files fed by per-machine data (`{{ .chezmoi.hostname }}`, `.chezmoi.toml`), rendering `.tmpl` files at apply time and writing real file **copies** (not symlinks). The user called this "really cool" but likes symlinks better. The user asked to keep this recorded so it is not designed ad-hoc later.
+- **Decision:** Not in v0.2.0; no per-file templating, no profiles, no host-conditional deployment in this iteration. rustow remains a linker: one source tree, one target tree, links only. Machine variance is served by separate packages (deployed selectively) today, and by root targeting (ADR 0001) for system paths. If a real per-machine need appears, templating gets its own RFC — it deliberately breaks the link-never-copy invariant (rendered output must be written), which is exactly the property the design defends today.
+- **Consequences:** Positive — v0.2.0 keeps a small, auditable surface; the invariant survives. Negative — host variance still needs per-host packages/manual juggling; accepted until a concrete case forces the RFC.
