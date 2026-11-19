@@ -1,6 +1,7 @@
 //! Provenance notice end-to-end tests (env vs stowrc fallback vs config file).
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
@@ -279,4 +280,41 @@ fn stowrc_unreadable_errors_not_panic() {
     .args(["link", "zsh"])
     .assert()
     .failure();
+}
+
+#[test]
+fn config_through_symlinked_dir_is_loaded_and_env_overrides_do_not_warn() {
+  let r = rig();
+  r.make_pkg("zsh");
+  // rustow's own fold style: XDG_CONFIG_HOME/rustow is a symlink into a package.
+  let real_cfg = r.xdg_config.join("dotfiles-pkg/.config/rustow");
+  fs::create_dir_all(&real_cfg).unwrap();
+  fs::write(
+    real_cfg.join("config.toml"),
+    format!(
+      "source = \"{}\"\ntarget = \"{}\"\n",
+      r.source.display(),
+      r.target.display()
+    ),
+  )
+  .unwrap();
+  symlink(&real_cfg, r.xdg_config.join("rustow")).unwrap();
+
+  // Linking with no env overrides proves the config behind the symlink is loaded.
+  r.cmd().args(["link", "zsh"]).assert().success();
+  r.cmd()
+    .args(["status", "zsh"])
+    .assert()
+    .success()
+    .stderr(contains("no config.toml").not());
+
+  // Env overrides flip provenance, but the config file still EXISTS:
+  // rustow must not claim it is missing or offer to overwrite it.
+  r.cmd()
+    .env("DOTFILES_DIR", &r.source)
+    .env("DOTFILES_TARGET", &r.target)
+    .args(["status", "zsh"])
+    .assert()
+    .success()
+    .stderr(contains("no config.toml").not());
 }

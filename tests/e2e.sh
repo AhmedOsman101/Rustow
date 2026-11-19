@@ -114,5 +114,21 @@ assert_symlink "${HOME}/.config/mytool" # moved into the package, then linked (f
 grep -q 'key = value' "${DOTFILES_DIR}/mytool/.config/mytool/settings.conf" || fail "moved content mismatch"
 pass "create adopts an existing target into a new package"
 
+# --- config reached through a symlinked config dir + env overrides ---
+echo "== rustow symlinked config dir =="
+REAL_CFG="${E2E}/dotfiles-pkg/.config/rustow"
+mkdir -p "${REAL_CFG}"
+printf 'source = "%s"\ntarget = "%s"\n' "${DOTFILES_DIR}" "${DOTFILES_TARGET}" >"${REAL_CFG}/config.toml"
+ln -s "${REAL_CFG}" "${XDG_CONFIG_HOME}/rustow"
+"${RUSTOW}" status mytool >/tmp/rustow-e2e/symlink-config.log 2>&1 || {
+  cat /tmp/rustow-e2e/symlink-config.log
+  fail "status with symlinked config dir failed"
+}
+if grep -q 'no config.toml' /tmp/rustow-e2e/symlink-config.log; then
+  cat /tmp/rustow-e2e/symlink-config.log
+  fail "false 'no config.toml' warning despite an existing symlinked config"
+fi
+pass "symlinked config dir works; env overrides do not claim config is missing"
+
 echo
 echo "ALL E2E SCENARIOS PASSED"

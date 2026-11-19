@@ -556,6 +556,7 @@ pub fn resolve(cli: &CliOverrides) -> Result<ResolvedConfig> {
   }
   if let Some(t) = &cli.target {
     target = PathBuf::from(expand_tilde_and_vars(&t.to_string_lossy()));
+    provenance = Provenance::Cli;
   }
 
   // expand ~ on file-provided values, then lexically normalize (no `..` traversal)
@@ -653,6 +654,12 @@ fn notice_description(resolved: &ResolvedConfig) -> String {
 /// config file, asks the user what to do.
 pub fn notice(resolved: &ResolvedConfig) -> Result<()> {
   use std::io::IsTerminal;
+  // A config file exists (possibly reached through a symlinked config dir):
+  // env/CLI overrides may change provenance, but they never make the file
+  // disappear. Never claim it is missing or offer to overwrite it.
+  if config_path().exists() {
+    return Ok(());
+  }
   let silenced = provenance_silenced();
   let is_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
   match notice_kind(resolved.provenance, silenced, is_tty) {
