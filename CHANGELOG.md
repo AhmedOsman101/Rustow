@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.4](https://github.com/AhmedOsman101/Rustow/compare/rustow-v0.1.3...rustow-v0.1.4) (2026-11-19)
+
+
+### Bug Fixes
+
+* **config:** never claim config.toml is missing when it exists ([860d86a](https://github.com/AhmedOsman101/Rustow/commit/860d86a2c534fc9a1d56ca111b500a9477957be3))
+
 ## [0.1.3](https://github.com/AhmedOsman101/Rustow/compare/rustow-v0.1.2...rustow-v0.1.3) (2026-11-14)
 
 ### Bug Fixes
