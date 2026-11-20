@@ -62,6 +62,7 @@ rustow reset             # remove all links
 | `create <app>` (alias `add`)             | Create a package, optionally adopting an existing target path                                                              |
 | `config default`                         | Print the annotated default config                                                                                         |
 | `config init`                            | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one) |
+| `config migrate [--yes] [--dry-run] [--stowrc PATH]` | Adopt stowrc values into `config.toml` without deleting the stowrc                                         |
 
 Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, `--target`, `--as-root` (authorize root-mapped steps without prompting).
 
@@ -155,6 +156,10 @@ rustow create mytool --source /path/to/files --path .config/mytool
 Precedence: CLI flags -> env (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback only when no config file exists; `$VAR`/`~` expansion). `--no-stowrc` or `RUSTOW_NO_STOWRC=1` disables the `~/.stowrc` fallback completely.
 
 Without a config file you'll see a warning naming what's being used instead; on a TTY you can create one pre-filled from the values in use, or silence the notice permanently (`[s]ilence`). `~/.stowrc` is supported for the transition away from GNU Stow.
+
+### Migrating from GNU Stow
+
+`rustow config migrate` adopts the values rustow already reads from `~/.stowrc` (`source`, `target`, `verbose`) into `config.toml`, filling only what the config leaves unset. It is interactive by default; `--yes` adopts without asking and `--dry-run` (the global flag) previews the change. `--stowrc PATH` reads a stowrc from elsewhere. The stowrc is **left untouched** — it is inert once a config file exists, so it can be deleted separately at your leisure ([ADR 0004](./docs/adr/0004-config-migrate.md)).
 
 Schema for editors: [`schema.json`](./schema.json). The full annotated default: [`docs/config.toml`](./docs/config.toml).
 
