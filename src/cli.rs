@@ -341,18 +341,24 @@ impl<'a> App<'a> {
     use crate::config::ConflictPolicy;
     use std::io::IsTerminal;
 
-    // A fixed policy (`-f`/`--adopt`, or any non-prompt `on_conflict`) gets
-    // its one real resolution in `link_pkgs`. Resolving here as well would
-    // decide the same conflict twice and discard the first decision.
+    // Only policies that actually *resolve* a conflict get their one real
+    // resolution in `link_pkgs`: `-f`/`--adopt` and Skip/Overwrite/Adopt.
+    // Deciding here too would discard the first decision. `Abort` never
+    // resolves — it must abort before the unlink, even on a TTY.
     if self.globals.force
       || self.globals.adopt
-      || !matches!(self.resolved.cfg.on_conflict, ConflictPolicy::Prompt)
+      || matches!(
+        self.resolved.cfg.on_conflict,
+        ConflictPolicy::Skip | ConflictPolicy::Overwrite | ConflictPolicy::Adopt
+      )
     {
       return Ok(());
     }
-    // The prompt resolver can ask questions and run a merge tool; never
-    // invoke it here. Leave the one interactive resolution to `link_pkgs`.
-    if std::io::stdin().is_terminal() {
+    // Only the interactive Prompt policy can ask questions or run a merge
+    // tool; never invoke it here. Leave its one real resolution to `link_pkgs`.
+    if matches!(self.resolved.cfg.on_conflict, ConflictPolicy::Prompt)
+      && std::io::stdin().is_terminal()
+    {
       return Ok(());
     }
 
@@ -366,8 +372,9 @@ impl<'a> App<'a> {
       ignore: &ignore,
     })?;
 
-    // No override, non-TTY: `AbortResolver` only returns Abort — no prompt,
-    // no filesystem change — so a conflict aborts while the tree is intact.
+    // Pure abort-style detection: `AbortResolver` only returns Abort — no
+    // prompt, no filesystem change — so a conflict aborts while the tree is
+    // intact. Covers the Abort policy on any TTY and Prompt on a non-TTY.
     let mut detector = AbortResolver;
     let mut outcomes = Vec::new();
     for plan in &plans {
@@ -534,8 +541,8 @@ pub fn run(cli: Cli) -> Result<i32> {
     Commands::Relink { pkgs } => {
       let app = App::new(&cli.global)?;
       // Detect a fatal link-phase conflict before the unlink (F2), leaving
-      // the current links intact. Fixed policies and TTY prompts defer to the
-      // single real resolution in `link_pkgs`; a dry run changes nothing.
+      // the current links intact. Resolving policies and TTY prompts defer to
+      // the single real resolution in `link_pkgs`; a dry run changes nothing.
       if !cli.global.dry_run {
         app.check_link_conflicts(&pkgs)?;
       }
