@@ -3,9 +3,11 @@
 //! Precedence: CLI flags > env vars (DOTFILES_DIR/DOTFILES_TARGET) > config.toml >
 //! ~/.stowrc (only when no config.toml exists — see Task 3).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use globset::GlobBuilder;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,51 @@ pub enum ConflictPolicy {
   Adopt,
 }
 
+/// Settings for a single package, keyed by its directory name under `source`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageConfig {
+  /// Biome-style list layered over the global `ignore` for this package only.
+  /// Positive globs re-include paths the global list hid; `!`-prefixed globs
+  /// hide them again. Absent means this package leaves the global list alone.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub includes: Option<Vec<String>>,
+}
+
+/// Compile one biome-style `includes` pattern.
+///
+/// A single leading `!` marks a re-exclusion; the remainder is a globset
+/// pattern with the same slash semantics as the global `ignore` list. The
+/// negation itself is interpreted when the effective matcher is built; this
+/// function only validates that the pattern is well-formed.
+pub fn compile_include_glob(pattern: &str) -> Result<globset::Glob> {
+  let glob = pattern.strip_prefix('!').unwrap_or(pattern);
+  GlobBuilder::new(glob)
+    .literal_separator(true)
+    .build()
+    .map_err(|e| Error::Config(format!("invalid include glob {pattern:?}: {e}")))
+}
+
+/// Deserialize the `[package.<name>]` table, validating every `includes`
+/// pattern as it is loaded so bad globs fail with the offending package key.
+fn deserialize_package_configs<'de, D>(
+  deserializer: D,
+) -> std::result::Result<HashMap<String, PackageConfig>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let packages = HashMap::<String, PackageConfig>::deserialize(deserializer)?;
+  for (name, package) in &packages {
+    if let Some(includes) = &package.includes {
+      for pattern in includes {
+        compile_include_glob(pattern)
+          .map_err(|e| serde::de::Error::custom(format!("package {name:?}: {e}")))?;
+      }
+    }
+  }
+  Ok(packages)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -78,6 +125,13 @@ pub struct Config {
   /// What to do when a real file already occupies a target path.
   #[serde(default)]
   pub on_conflict: ConflictPolicy,
+  /// Per-package settings, keyed by package name (`[package.<name>]`).
+  #[serde(
+    default,
+    skip_serializing_if = "HashMap::is_empty",
+    deserialize_with = "deserialize_package_configs"
+  )]
+  pub package: HashMap<String, PackageConfig>,
 }
 
 fn default_target() -> PathBuf {
@@ -109,6 +163,7 @@ impl Default for Config {
       ignore: default_ignore(),
       diff_tool: None,
       on_conflict: ConflictPolicy::Prompt,
+      package: HashMap::new(),
     }
   }
 }
@@ -211,6 +266,12 @@ ignore = [
 #   overwrite — target is deleted; symlink to the package's version
 #   adopt     — target's content is moved into the package; symlink
 on_conflict = "prompt"
+
+# Per-package settings. `includes` is a biome-style list layered over the
+# global `ignore` for ONE package: positive globs re-include paths the global
+# list hid, `!`-prefixed globs hide them again. Omitted = no change.
+# [package.my-app]
+# includes = ["**", "!**/*.local"]
 "#
 );
 

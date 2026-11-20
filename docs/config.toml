@@ -53,3 +53,9 @@ ignore = [
 #   overwrite — target is deleted; symlink to the package's version
 #   adopt     — target's content is moved into the package; symlink
 on_conflict = "prompt"
+
+# Per-package settings. `includes` is a biome-style list layered over the
+# global `ignore` for ONE package: positive globs re-include paths the global
+# list hid, `!`-prefixed globs hide them again. Omitted = no change.
+# [package.my-app]
+# includes = ["**", "!**/*.local"]

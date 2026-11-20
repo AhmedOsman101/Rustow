@@ -53,6 +53,13 @@
       "$ref": "#/$defs/ConflictPolicy",
       "default": "prompt"
     },
+    "package": {
+      "description": "Per-package settings, keyed by package name (`[package.<name>]`).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PackageConfig"
+      }
+    },
     "source": {
       "description": "Stow directory; its direct subdirectories are the packages.\nNo default — rustow errors out until it is set.",
       "type": [
@@ -100,6 +107,23 @@
           "const": "adopt"
         }
       ]
+    },
+    "PackageConfig": {
+      "description": "Settings for a single package, keyed by its directory name under `source`.",
+      "type": "object",
+      "properties": {
+        "includes": {
+          "description": "Biome-style list layered over the global `ignore` for this package only.\nPositive globs re-include paths the global list hid; `!`-prefixed globs\nhide them again. Absent means this package leaves the global list alone.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
