@@ -25,6 +25,10 @@ Prebuilt binaries are attached to each [GitHub release](https://github.com/Ahmed
 | `rustow-macos-x64` / `rustow-macos-arm64`             | macOS x86_64 / Apple silicon |
 | `rustow-windows-x64.exe` / `rustow-windows-arm64.exe` | Windows x86_64 / arm64       |
 
+## Platform support
+
+rustow targets Unix-like systems. On Windows, use it under Git Bash / WSL / Cygwin — Windows is not a supported first-class target. Windows binaries still ship because they work in those environments, but native Windows behavior is not supported or tested (see [ADR 0007](./docs/adr/0007-distribution.md)).
+
 ## Quickstart
 
 Declare where your packages live (one directory per package) in `~/.config/rustow/config.toml`:

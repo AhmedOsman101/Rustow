@@ -12,6 +12,10 @@ The `status` command's design was informed by reading the status implementation 
 - `rustow` operates on `$HOME` only when the user explicitly invokes a command. There is no background behavior, no implicit scan-and-fix, and no "live home" guard beyond the normal conflict semantics — that _is_ the safety model.
 - No scripts are modified as part of this work (cutover is the user's manual decision).
 
+## Platform support
+
+rustow targets Unix-like systems. On Windows it is supported only under Git Bash / WSL / Cygwin; Windows is not a first-class target. Windows binaries keep shipping because they work in those environments — there is no separate native-Windows support (see [ADR 0007](./adr/0007-distribution.md)).
+
 ## Commands
 
 | Command                                     | Behavior                                                                                                                                                                                                                                                                                                                      |
