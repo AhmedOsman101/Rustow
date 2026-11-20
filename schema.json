@@ -10,6 +10,13 @@
         "null"
       ]
     },
+    "elevate_cmd": {
+      "description": "Elevation program for root-mapped actions (ADR 0001). When unset, rustow\nprobes `sudo`, then `doas`. The program receives the action as its argv,\ne.g. `<program> ln -s <src> <dst>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "fold": {
       "description": "Fold package directories into single symlinks where possible.",
       "type": "boolean",

@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -270,7 +271,9 @@ fn dotdot_key_surfaces_at_cli() {
 #[test]
 fn tilde_value_parses_under_isolated_home() {
   let r = rig("[package.snapper.root]\n\"configs\" = \"~/snapper\"\n");
-  r.make_pkg("snapper", &["existing.conf"]);
+  // Task 19 wires root mappings into the CLI, so the mapped source must exist
+  // at plan time (a missing source is now a clean plan-time error).
+  r.make_pkg("snapper", &["existing.conf", "configs/theme.conf"]);
   r.cmd()
     .args(["link", "--dry-run", "snapper"])
     .assert()
@@ -566,4 +569,323 @@ fn missing_mapped_source_is_clean_plan_time_error() {
     "error must name the missing root source, got: {msg}"
   );
   assert!(!dest.exists(), "nothing applied");
+}
+
+// --- Task 19: apply + elevation with plan-time preflight (ADR 0001) -------
+//
+// CLI-level fixtures. Every path (including the "root" destination) lives in a
+// tempdir under /tmp/opencode; the stub elevation program just `exec`s its argv
+// as the invoking user. Real $HOME, ~/.stowrc and /etc are never touched.
+
+struct ElevRig {
+  _tmp: tempfile::TempDir,
+  source: PathBuf,
+  xdg: PathBuf,
+  home: PathBuf,
+  dest_parent: PathBuf,
+  log: PathBuf,
+}
+
+fn elev_rig(with_stub: bool) -> ElevRig {
+  let base = Path::new("/tmp/opencode");
+  let mut builder = tempfile::Builder::new();
+  builder.prefix("rustow-task19-");
+  let tmp = if base.is_dir() {
+    builder.tempdir_in(base).unwrap()
+  } else {
+    builder.tempdir().unwrap()
+  };
+  let source = tmp.path().join("Configs");
+  let xdg = tmp.path().join("xdg");
+  let home = tmp.path().join("home");
+  let bin = tmp.path().join("bin");
+  let dest_parent = tmp.path().join("system/etc/app");
+  let stub = bin.join("elevate-shim");
+  let log = bin.join("calls.log");
+  fs::create_dir_all(&source).unwrap();
+  fs::create_dir_all(xdg.join("rustow")).unwrap();
+  fs::create_dir_all(&home).unwrap();
+  fs::create_dir_all(&bin).unwrap();
+  fs::create_dir_all(&dest_parent).unwrap();
+  if with_stub {
+    fs::write(
+      &stub,
+      format!("#!/bin/sh\necho \"$@\" >> {}\nexec \"$@\"\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+  }
+  let dest = dest_parent.join("app.ini");
+  let body = format!(
+    "elevate_cmd = {:?}\n\n[package.app.root]\n\"app.ini\" = {:?}\n",
+    stub.to_str().unwrap(),
+    dest.to_str().unwrap()
+  );
+  fs::write(xdg.join("rustow/config.toml"), body).unwrap();
+  ElevRig {
+    _tmp: tmp,
+    source,
+    xdg,
+    home,
+    dest_parent,
+    log,
+  }
+}
+
+impl ElevRig {
+  fn cmd(&self) -> Command {
+    let mut cmd = Command::cargo_bin("rustow").unwrap();
+    cmd
+      .env("XDG_CONFIG_HOME", &self.xdg)
+      .env("XDG_CACHE_HOME", &self.xdg)
+      .env("HOME", &self.home)
+      .env("DOTFILES_DIR", &self.source)
+      .env("DOTFILES_TARGET", self.home.join("target"))
+      .env("NO_COLOR", "1");
+    cmd
+  }
+
+  fn make_pkg(&self) {
+    let root = self.source.join("app");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("app.ini"), "system ini").unwrap();
+    fs::write(root.join(".zshrc"), "home zshrc").unwrap();
+  }
+
+  fn dest(&self) -> PathBuf {
+    self.dest_parent.join("app.ini")
+  }
+
+  fn ordinary(&self) -> PathBuf {
+    self.home.join("target/.zshrc")
+  }
+}
+
+fn stderr_of(out: &assert_cmd::assert::Assert) -> String {
+  String::from_utf8(out.get_output().stderr.clone()).unwrap()
+}
+
+/// (a) Non-TTY without --as-root: stderr names --as-root and NOTHING changes.
+#[test]
+fn non_tty_without_as_root_aborts_with_hint() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  let out = r
+    .cmd()
+    .args(["link", "app"])
+    .write_stdin("")
+    .assert()
+    .failure();
+  let stderr = stderr_of(&out);
+  assert!(
+    stderr.contains("--as-root"),
+    "stderr must name --as-root, got: {stderr}"
+  );
+  assert!(!r.dest().exists(), "root link must not be created");
+  assert!(
+    !r.ordinary().exists(),
+    "zero filesystem changes: ordinary link must not be created"
+  );
+}
+
+/// (b) --dry-run --as-root: nothing is applied, no elevation, no prompt.
+#[test]
+fn dry_run_with_as_root_applies_nothing() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  let out = r
+    .cmd()
+    .args(["link", "--dry-run", "--as-root", "app"])
+    .assert()
+    .success();
+  assert!(!r.dest().exists(), "dry run must not create the root link");
+  assert!(
+    !r.ordinary().exists(),
+    "dry run must not create ordinary link"
+  );
+  assert!(!r.log.exists(), "dry run must never invoke elevation");
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(stdout.contains("would link"), "got: {stdout}");
+}
+
+/// (c) A stub elevate_cmd creates the root link via `ln`/`mkdir -p`; unlink
+/// removes exactly the mapped link, while ordinary links stay ordinary.
+#[test]
+fn elevate_stub_applies_and_unlinks_root_mapped_path() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+
+  assert!(r.dest().is_symlink());
+  assert_eq!(
+    fs::read_link(r.dest()).unwrap(),
+    r.source.join("app/app.ini")
+  );
+  assert!(
+    r.ordinary().is_symlink(),
+    "ordinary link stays with the user"
+  );
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(
+    log.contains("mkdir -p"),
+    "stub must create parent dirs: {log}"
+  );
+  assert!(log.contains("ln -s"), "stub must create the link: {log}");
+
+  r.cmd()
+    .args(["unlink", "--as-root", "app"])
+    .assert()
+    .success();
+  assert!(
+    !r.dest().exists() && !r.dest().is_symlink(),
+    "root link removed"
+  );
+  assert!(!r.ordinary().exists(), "ordinary link removed");
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(
+    log.contains("rm -f"),
+    "unlink must go through the elevation helper: {log}"
+  );
+}
+
+/// (d) A nonexistent elevate_cmd is a clear plan-time error; nothing applied.
+#[test]
+fn nonexistent_elevate_cmd_fails_before_mutation() {
+  let r = elev_rig(false);
+  r.make_pkg();
+  let out = r
+    .cmd()
+    .args(["link", "--as-root", "app"])
+    .write_stdin("")
+    .assert()
+    .failure();
+  let stderr = stderr_of(&out);
+  assert!(
+    stderr.contains("elevate_cmd") && stderr.contains("not executable"),
+    "error must name the bad elevate_cmd, got: {stderr}"
+  );
+  assert!(!r.dest().exists());
+  assert!(!r.ordinary().exists(), "zero filesystem changes");
+}
+
+/// (e) An unwritable destination parent aborts before ANY mutation.
+#[test]
+fn unwritable_destination_parent_aborts_before_mutation() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  fs::set_permissions(&r.dest_parent, fs::Permissions::from_mode(0o555)).unwrap();
+  let out = r
+    .cmd()
+    .args(["link", "--as-root", "app"])
+    .write_stdin("")
+    .assert()
+    .failure();
+  let stderr = stderr_of(&out);
+  assert!(
+    stderr.contains("not writable"),
+    "error must name the writability failure, got: {stderr}"
+  );
+  assert!(!r.dest().exists());
+  assert!(
+    !r.ordinary().exists(),
+    "no ordinary link may be applied when preflight fails"
+  );
+  fs::set_permissions(&r.dest_parent, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// (f) Answering 'n' at the y/n prompt aborts the whole run.
+#[test]
+fn declining_elevation_prompt_aborts_everything() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  let out = r
+    .cmd()
+    .args(["link", "app"])
+    .write_stdin("n\n")
+    .assert()
+    .failure();
+  let stderr = stderr_of(&out);
+  assert!(
+    stderr.contains("proceed with elevated steps? [y/n]"),
+    "prompt must be shown, got: {stderr}"
+  );
+  assert!(stderr.contains("aborted"), "got: {stderr}");
+  assert!(!r.dest().exists());
+  assert!(!r.ordinary().exists(), "zero filesystem changes");
+}
+
+/// Review note #3: a root conflict resolved by Overwrite must stay on the
+/// elevated path (not be converted into an ordinary `Action::Link`).
+#[test]
+fn root_conflict_overwrite_stays_elevated() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  fs::write(r.dest(), "system file in the way").unwrap();
+  r.cmd()
+    .args(["link", "--as-root", "--force", "app"])
+    .assert()
+    .success();
+  assert!(r.dest().is_symlink(), "overwrite produced our root link");
+  assert_eq!(
+    fs::read_link(r.dest()).unwrap(),
+    r.source.join("app/app.ini")
+  );
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(
+    log.contains("ln -s"),
+    "root overwrite must use elevation: {log}"
+  );
+}
+
+/// Review note #2: two packages claiming the SAME absolute root destination
+/// is a cross-package conflict, detected at plan time.
+#[test]
+fn duplicate_absolute_root_destination_is_cross_package_conflict() {
+  let f = plan_fixture();
+  f.write("a", "shared.ini");
+  f.write("b", "shared.ini");
+  let dest = f.target.join("etc/duplicate.ini");
+  let mut all = RootMappings::new();
+  all.insert(
+    "a".to_string(),
+    roots_inner(&[("shared.ini", dest.to_str().unwrap())]),
+  );
+  all.insert(
+    "b".to_string(),
+    roots_inner(&[("shared.ini", dest.to_str().unwrap())]),
+  );
+  let ignore = Ignore::new(&[]).unwrap();
+  let pkgs = vec!["a".to_string(), "b".to_string()];
+  let plans = plan_link_all_with_roots(
+    &LinkInput {
+      source: &f.source,
+      target: &f.target,
+      pkgs: &pkgs,
+      fold: true,
+      fold_ignore: &[],
+      ignore: &ignore,
+    },
+    &all,
+  )
+  .unwrap();
+  let conflicts: Vec<_> = plans
+    .iter()
+    .flat_map(|p| p.conflicts.iter().filter(|c| c.dst == dest))
+    .collect();
+  assert!(
+    conflicts
+      .iter()
+      .any(|c| c.reason == ConflictReason::CrossPackage),
+    "expected a cross-package root conflict, got: {conflicts:?}"
+  );
+}
+
+fn roots_inner(mappings: &[(&str, &str)]) -> BTreeMap<String, String> {
+  mappings
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }

@@ -204,6 +204,11 @@ pub struct Config {
   /// What to do when a real file already occupies a target path.
   #[serde(default)]
   pub on_conflict: ConflictPolicy,
+  /// Elevation program for root-mapped actions (ADR 0001). When unset, rustow
+  /// probes `sudo`, then `doas`. The program receives the action as its argv,
+  /// e.g. `<program> ln -s <src> <dst>`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub elevate_cmd: Option<String>,
   /// Per-package settings, keyed by package name (`[package.<name>]`).
   #[serde(
     default,
@@ -242,6 +247,7 @@ impl Default for Config {
       ignore: default_ignore(),
       diff_tool: None,
       on_conflict: ConflictPolicy::Prompt,
+      elevate_cmd: None,
       package: HashMap::new(),
     }
   }
@@ -345,6 +351,11 @@ ignore = [
 #   overwrite — target is deleted; symlink to the package's version
 #   adopt     — target's content is moved into the package; symlink
 on_conflict = "prompt"
+
+# Elevation program used ONLY for root-mapped actions (ADR 0001). It receives
+# the action as argv, e.g. `<program> ln -s <src> <dst>`. Unset = probe `sudo`,
+# then `doas`. Could be a path to a helper script (e.g. "/usr/local/bin/rustow-sudo").
+# elevate_cmd = "sudo"
 
 # Per-package settings. `includes` is a biome-style list layered over the
 # global `ignore` for ONE package: positive globs re-include paths the global

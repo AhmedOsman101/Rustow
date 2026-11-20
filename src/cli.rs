@@ -1,16 +1,18 @@
 //! clap definitions and dispatch.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::{self, CliOverrides};
+use crate::elevate::{self, Elevation};
 use crate::error::{Error, Result};
 use crate::ignore::Ignore;
 use crate::link::{
   self, AbortResolver, ConflictResolution, ConflictResolver, FixedResolver, LinkInput,
-  PromptOutcome,
+  PromptOutcome, RootMappings,
 };
 
 #[derive(Debug, Parser)]
@@ -45,6 +47,11 @@ pub struct GlobalArgs {
   /// Verbose output (-v per-package detail, -vv uncapped).
   #[arg(short, long, global = true, action = clap::ArgAction::Count)]
   pub verbose: u8,
+
+  /// Authorize elevated root-mapped actions non-interactively (ADR 0001).
+  /// Without this, root-mapped actions prompt on a TTY and abort on non-TTY.
+  #[arg(long, global = true)]
+  pub as_root: bool,
 
   /// Never read ~/.stowrc, even when no config file exists (overrides the fallback;
   /// can also be set with RUSTOW_NO_STOWRC=1).
@@ -198,6 +205,31 @@ pub fn list_packages(source: &Path) -> Result<Vec<String>> {
   Ok(out)
 }
 
+/// Collect `[package.<name>.root]` tables from the resolved config. Values are
+/// already normalized to absolute paths by the config loader.
+fn root_mappings(cfg: &config::Config) -> RootMappings {
+  cfg
+    .package
+    .iter()
+    .filter_map(|(pkg, pc)| pc.root.as_ref().map(|roots| (pkg.clone(), roots.clone())))
+    .collect()
+}
+
+/// Authorize + probe + preflight, in that order, so a non-TTY run without
+/// `--as-root` always fails with the `--as-root` hint even if elevation is
+/// also unavailable. Nothing mutates the filesystem here.
+fn prepare_elevation(
+  descriptions: Vec<String>,
+  dsts: HashSet<PathBuf>,
+  configured: Option<&str>,
+  as_root: bool,
+) -> Result<Elevation> {
+  elevate::authorize(&descriptions, as_root)?;
+  let elevation = Elevation::probe(configured)?;
+  elevation.preflight(&dsts)?;
+  Ok(elevation)
+}
+
 struct App<'a> {
   globals: &'a GlobalArgs,
   resolved: config::ResolvedConfig,
@@ -255,21 +287,60 @@ impl<'a> App<'a> {
 
   fn link_pkgs(&self, pkgs: &[String]) -> Result<i32> {
     let ignore = self.ignore()?;
-    let plans = link::plan_link_all(&LinkInput {
-      source: self.source(),
-      target: self.target(),
-      pkgs,
-      fold: self.resolved.cfg.fold,
-      fold_ignore: &self.resolved.cfg.fold_ignore,
-      ignore: &ignore,
-    })?;
+    let roots = root_mappings(&self.resolved.cfg);
+    let plans = link::plan_link_all_with_roots(
+      &LinkInput {
+        source: self.source(),
+        target: self.target(),
+        pkgs,
+        fold: self.resolved.cfg.fold,
+        fold_ignore: &self.resolved.cfg.fold_ignore,
+        ignore: &ignore,
+      },
+      &roots,
+    )?;
+
+    // Root-mapped actions are authorized + preflighted before anything is
+    // applied. Dry run never prompts and never elevates (dry-run wins, even
+    // with --as-root).
+    let root_dsts: HashSet<PathBuf> = plans
+      .iter()
+      .flat_map(|p| p.root_dsts.iter().cloned())
+      .collect();
+    let elevation = if self.globals.dry_run || root_dsts.is_empty() {
+      None
+    } else {
+      let mut descriptions = Vec::new();
+      for plan in &plans {
+        for action in &plan.actions {
+          if matches!(
+            action,
+            link::Action::RootLink { .. } | link::Action::RootFold { .. }
+          ) {
+            descriptions.push(render_action(action));
+          }
+        }
+        for conflict in &plan.conflicts {
+          if plan.root_dsts.contains(&conflict.dst) {
+            descriptions.push(format!("resolve root conflict {}", conflict.dst.display()));
+          }
+        }
+      }
+      Some(prepare_elevation(
+        descriptions,
+        root_dsts,
+        self.resolved.cfg.elevate_cmd.as_deref(),
+        self.globals.as_root,
+      )?)
+    };
 
     let mut resolver = self.make_resolver();
-    match link::apply_plans(
+    match link::apply_plans_with_elevation(
       &plans,
       self.source(),
       resolver.as_mut(),
       self.globals.dry_run,
+      elevation.as_ref(),
     ) {
       Ok(out) => {
         if self.resolved.cfg.verbose || self.globals.verbose > 0 {
@@ -299,9 +370,59 @@ impl<'a> App<'a> {
     }
   }
 
+  /// Absolute root destinations that currently hold one of our links, for the
+  /// packages being unlinked. A root mapping whose source has vanished cannot
+  /// be re-derived and is skipped (nothing can be linked to it anyway).
+  fn root_unlink_dests(&self, pkgs: &[String]) -> Result<Vec<PathBuf>> {
+    let roots = root_mappings(&self.resolved.cfg);
+    let mut out = Vec::new();
+    for pkg in pkgs {
+      let pkg_root = self.source().join(pkg);
+      let Some(mappings) = roots.get(pkg) else {
+        continue;
+      };
+      for (key, value) in mappings {
+        let Ok((_src, dst, _is_dir)) = link::root_destination(pkg, &pkg_root, key, value) else {
+          continue;
+        };
+        let Ok(raw) = fs::read_link(&dst) else {
+          continue;
+        };
+        let abs = if raw.is_absolute() {
+          raw
+        } else {
+          dst.parent().unwrap_or_else(|| Path::new(".")).join(raw)
+        };
+        if link::lexical_normalize(&abs).starts_with(&pkg_root) {
+          out.push(dst);
+        }
+      }
+    }
+    Ok(out)
+  }
+
   fn unlink_pkgs(&self, pkgs: &[String]) -> Result<i32> {
     let ignore = self.ignore()?;
     let plan = link::plan_unlink(self.source(), self.target(), pkgs, &ignore, false)?;
+    let root_links = self.root_unlink_dests(pkgs)?;
+
+    // Same authorization/preflight as linking, before any mutation.
+    let elevation = if self.globals.dry_run || root_links.is_empty() {
+      None
+    } else {
+      let descriptions: Vec<String> = root_links
+        .iter()
+        .map(|dst| format!("unlink {}", dst.display()))
+        .collect();
+      let dsts: HashSet<PathBuf> = root_links.iter().cloned().collect();
+      Some(prepare_elevation(
+        descriptions,
+        dsts,
+        self.resolved.cfg.elevate_cmd.as_deref(),
+        self.globals.as_root,
+      )?)
+    };
+
     let n = link::apply_unlink(
       &plan,
       self.target(),
@@ -309,6 +430,13 @@ impl<'a> App<'a> {
       &ignore,
       self.globals.dry_run,
     )?;
+    let mut root_removed = 0usize;
+    if let Some(elev) = &elevation {
+      for dst in &root_links {
+        elev.remove(dst)?;
+        root_removed += 1;
+      }
+    }
     let verb = if self.globals.dry_run {
       "would unlink"
     } else {
@@ -319,9 +447,13 @@ impl<'a> App<'a> {
         let link::UnlinkAction::Unlink { dst } = action;
         println!("unlink {}", dst.display());
       }
+      for dst in &root_links {
+        println!("{verb} {}", dst.display());
+      }
     }
     println!(
-      "{verb} {n} link(s){}",
+      "{verb} {} link(s){}",
+      n + root_removed,
       if plan.foreign_skipped.is_empty() {
         String::new()
       } else {
@@ -363,14 +495,18 @@ impl<'a> App<'a> {
     }
 
     let ignore = self.ignore()?;
-    let plans = link::plan_link_all(&LinkInput {
-      source: self.source(),
-      target: self.target(),
-      pkgs,
-      fold: self.resolved.cfg.fold,
-      fold_ignore: &self.resolved.cfg.fold_ignore,
-      ignore: &ignore,
-    })?;
+    let roots = root_mappings(&self.resolved.cfg);
+    let plans = link::plan_link_all_with_roots(
+      &LinkInput {
+        source: self.source(),
+        target: self.target(),
+        pkgs,
+        fold: self.resolved.cfg.fold,
+        fold_ignore: &self.resolved.cfg.fold_ignore,
+        ignore: &ignore,
+      },
+      &roots,
+    )?;
 
     // Pure abort-style detection: `AbortResolver` only returns Abort — no
     // prompt, no filesystem change — so a conflict aborts while the tree is

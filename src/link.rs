@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+use crate::elevate::Elevation;
 use crate::error::{Error, Result};
 use crate::ignore::Ignore;
 use crate::platform;
@@ -162,6 +163,9 @@ impl std::fmt::Display for Conflict {
 pub struct Plan {
   pub actions: Vec<Action>,
   pub conflicts: Vec<Conflict>,
+  /// Absolute destinations claimed by this plan's root-mapped actions (and
+  /// root conflicts). Used to keep root conflicts on the elevated path.
+  pub root_dsts: HashSet<PathBuf>,
 }
 
 /// Lexical normalization: resolves `.` and `..` components without touching the fs.
@@ -306,6 +310,7 @@ impl<'a> Planner<'a> {
     Plan {
       actions: self.actions,
       conflicts: self.conflicts,
+      root_dsts: HashSet::new(),
     }
   }
 
@@ -708,6 +713,38 @@ fn validate_pkg(source: &Path, pkg: &str) -> Result<()> {
 /// config loader; trailing slashes are cosmetic and never decide the kind.
 pub type RootMappings = HashMap<String, BTreeMap<String, String>>;
 
+/// Resolve one `[package.<name>.root]` mapping to `(abs_src, dst, is_dir)`.
+/// The source path's *actual* filesystem type decides the mapping kind
+/// (ADR 0001, amended): a real directory folds to `<value>/<basename>`, a file
+/// (or symlink leaf) links to `value` exactly. This is shared by the planner
+/// and by unlink so both compute identical destinations.
+pub fn root_destination(
+  pkg: &str,
+  pkg_root: &Path,
+  key: &str,
+  value: &str,
+) -> Result<(PathBuf, PathBuf, bool)> {
+  let src_rel = lexical_normalize(Path::new(key));
+  let abs_src = lexical_normalize(&pkg_root.join(&src_rel));
+  let meta = fs::symlink_metadata(&abs_src).map_err(|_| {
+    Error::Config(format!(
+      "root mapping for package {pkg:?}: source path {} (key {key:?}) does not exist — nothing to link",
+      abs_src.display()
+    ))
+  })?;
+  let is_dir = meta.is_dir();
+  let dst = if is_dir {
+    let base = abs_src
+      .file_name()
+      .map(PathBuf::from)
+      .unwrap_or_else(|| abs_src.clone());
+    lexical_normalize(&PathBuf::from(value).join(base))
+  } else {
+    lexical_normalize(Path::new(value))
+  };
+  Ok((abs_src, dst, is_dir))
+}
+
 pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
   plan_link_all_with_roots(input, &RootMappings::new())
 }
@@ -725,6 +762,9 @@ pub fn plan_link_all_with_roots(input: &LinkInput<'_>, roots: &RootMappings) -> 
   let mut pkg_root_actions: HashMap<String, Vec<Action>> = HashMap::new();
   let mut pkg_root_conflicts: HashMap<String, Vec<Conflict>> = HashMap::new();
   let mut pkg_root_paths: HashMap<String, HashSet<PathBuf>> = HashMap::new();
+  let mut pkg_root_dsts: HashMap<String, HashSet<PathBuf>> = HashMap::new();
+  // Absolute root destinations claimed so far, across *all* packages.
+  let mut root_claims: HashMap<PathBuf, String> = HashMap::new();
 
   for pkg in input.pkgs {
     validate_pkg(input.source, pkg)?;
@@ -733,34 +773,31 @@ pub fn plan_link_all_with_roots(input: &LinkInput<'_>, roots: &RootMappings) -> 
     let mut mapped: Vec<(PathBuf, PathBuf)> = Vec::new(); // (package-relative source path, abs_src)
     let mut root_actions = Vec::new();
     let mut root_conflicts = Vec::new();
+    let mut root_dsts = HashSet::new();
 
     // `roots` values are BTreeMap, so iteration (and thus action order) is
     // deterministic by key. No slash-based decisions here: Path ignores a
     // trailing slash on both the key and the value.
     if let Some(mappings) = roots.get(pkg) {
       for (key, value) in mappings {
-        let src_rel = lexical_normalize(Path::new(key));
-        let abs_src = lexical_normalize(&pkg_root.join(&src_rel));
-        let meta = fs::symlink_metadata(&abs_src).map_err(|_| {
-          Error::Config(format!(
-            "root mapping for package {pkg:?}: source path {} (key {key:?}) does not exist — nothing to link",
-            abs_src.display()
-          ))
-        })?;
-        // A symlink is a leaf, just as scan_package classifies it: only a real
-        // directory becomes a fold-style root mapping.
-        let is_dir = meta.is_dir();
-        let dst = if is_dir {
-          let base = abs_src
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| abs_src.clone());
-          lexical_normalize(&PathBuf::from(value).join(base))
+        let (abs_src, dst, is_dir) = root_destination(pkg, &pkg_root, key, value)?;
+
+        // Two packages claiming the same absolute root destination is a
+        // cross-package conflict, just like two packages claiming the same
+        // target-tree path. The second claimant gets the conflict.
+        if let Some(owner) = root_claims.get(&dst) {
+          root_conflicts.push(Conflict {
+            dst: dst.clone(),
+            reason: ConflictReason::CrossPackage,
+            src: Some(abs_src.clone()),
+            detail: Some(PathBuf::from(owner)),
+          });
         } else {
-          lexical_normalize(Path::new(value))
-        };
+          root_claims.insert(dst.clone(), pkg.to_string());
+        }
 
         probe_root_dst(&abs_src, &dst, &mut root_conflicts);
+        root_dsts.insert(dst.clone());
         if is_dir {
           root_actions.push(Action::RootFold {
             src_dir: abs_src.clone(),
@@ -772,7 +809,7 @@ pub fn plan_link_all_with_roots(input: &LinkInput<'_>, roots: &RootMappings) -> 
             dst,
           });
         }
-        mapped.push((src_rel, abs_src));
+        mapped.push((lexical_normalize(Path::new(key)), abs_src));
       }
     }
 
@@ -790,6 +827,7 @@ pub fn plan_link_all_with_roots(input: &LinkInput<'_>, roots: &RootMappings) -> 
     pkg_root_actions.insert(pkg.clone(), root_actions);
     pkg_root_conflicts.insert(pkg.clone(), root_conflicts);
     pkg_root_paths.insert(pkg.clone(), root_paths);
+    pkg_root_dsts.insert(pkg.clone(), root_dsts);
   }
 
   let blocked = compute_blocked_folds(input.target, &pkg_entries);
@@ -824,6 +862,7 @@ pub fn plan_link_all_with_roots(input: &LinkInput<'_>, roots: &RootMappings) -> 
     if let Some(mut extra) = pkg_root_conflicts.remove(pkg) {
       plan.conflicts.append(&mut extra);
     }
+    plan.root_dsts = pkg_root_dsts.remove(pkg).unwrap_or_default();
     plans.push(plan);
   }
   Ok(plans)
@@ -941,6 +980,20 @@ pub fn apply_plans(
   resolver: &mut dyn ConflictResolver,
   dry_run: bool,
 ) -> Result<ApplyOutcome> {
+  apply_plans_with_elevation(plans, source, resolver, dry_run, None)
+}
+
+/// Apply link plans, routing root-mapped actions through `elevate`. Authorization
+/// (y/n prompt or `--as-root`) and plan-time preflight are performed by the
+/// caller before this function; `elevate` is `None` only for runs with no
+/// root-mapped actions.
+pub fn apply_plans_with_elevation(
+  plans: &[Plan],
+  source: &Path,
+  resolver: &mut dyn ConflictResolver,
+  dry_run: bool,
+  elevate: Option<&Elevation>,
+) -> Result<ApplyOutcome> {
   // dry-run: never resolve, never touch the fs — just report the plan
   if dry_run {
     let mut out = ApplyOutcome {
@@ -982,13 +1035,56 @@ pub fn apply_plans(
     return Err(Error::Conflicts(report));
   }
 
+  // Which kind of root action each absolute destination expects, so a root
+  // conflict resolved to Overwrite/Merge/Adopt stays on the elevated path.
+  enum RootKind {
+    Link,
+    Fold,
+  }
+  let mut root_kinds: HashMap<PathBuf, RootKind> = HashMap::new();
+  let mut all_root_dsts: HashSet<PathBuf> = HashSet::new();
+  for plan in plans {
+    all_root_dsts.extend(plan.root_dsts.iter().cloned());
+    for action in &plan.actions {
+      match action {
+        Action::RootLink { dst, .. } => {
+          root_kinds.insert(dst.clone(), RootKind::Link);
+        }
+        Action::RootFold { dst, .. } => {
+          root_kinds.insert(dst.clone(), RootKind::Fold);
+        }
+        _ => {}
+      }
+    }
+  }
+  if !all_root_dsts.is_empty() && elevate.is_none() {
+    return Err(Error::Config(
+      "root-mapped actions require an elevation context (internal error)".to_string(),
+    ));
+  }
+  let root_action_for = |dst: &Path, src: PathBuf| -> Action {
+    match root_kinds.get(dst) {
+      Some(RootKind::Fold) => Action::RootFold {
+        src_dir: src,
+        dst: dst.to_path_buf(),
+      },
+      _ => Action::RootLink {
+        src,
+        dst: dst.to_path_buf(),
+      },
+    }
+  };
+
   // 2. rewrite conflict actions into fs ops we can apply
   let mut actions: Vec<Action> = Vec::new();
   let mut adopted: Vec<(PathBuf, PathBuf)> = Vec::new(); // (target, package_src)
   let mut overwritten: Vec<PathBuf> = Vec::new();
   let mut skip_dsts: HashSet<PathBuf> = HashSet::new();
   let mut fixup_dsts: HashSet<PathBuf> = HashSet::new();
+  // Root destinations whose existing target must be removed via elevation.
+  let mut root_overwrites: HashSet<PathBuf> = HashSet::new();
   for (c, outcome) in outcomes {
+    let is_root = all_root_dsts.contains(&c.dst);
     let src = c.src.clone();
     match outcome {
       PromptOutcome::Skip => {
@@ -997,15 +1093,31 @@ pub fn apply_plans(
       PromptOutcome::Overwrite | PromptOutcome::Merge => {
         overwritten.push(c.dst.clone());
         fixup_dsts.insert(c.dst.clone());
+        if is_root {
+          root_overwrites.insert(c.dst.clone());
+        }
         if let Some(src) = src {
-          actions.push(Action::Link { src, dst: c.dst });
+          actions.push(if is_root {
+            root_action_for(&c.dst, src)
+          } else {
+            Action::Link { src, dst: c.dst }
+          });
         }
       }
       PromptOutcome::Adopt => {
         fixup_dsts.insert(c.dst.clone());
+        if is_root {
+          // Adopting a root-owned file into the package cannot be done by the
+          // invoking user; remove it via elevation and link instead.
+          root_overwrites.insert(c.dst.clone());
+        }
         if let Some(src) = src {
-          adopted.push((c.dst.clone(), src.clone()));
-          actions.push(Action::Link { src, dst: c.dst });
+          if is_root {
+            actions.push(root_action_for(&c.dst, src));
+          } else {
+            adopted.push((c.dst.clone(), src.clone()));
+            actions.push(Action::Link { src, dst: c.dst });
+          }
         }
       }
       PromptOutcome::Abort => unreachable!("checked above"),
@@ -1016,7 +1128,11 @@ pub fn apply_plans(
     for a in &plan.actions {
       match a {
         Action::SkipIdempotent { .. } => {}
-        Action::Link { dst, .. } | Action::Fold { dst, .. } | Action::Repair { dst, .. }
+        Action::Link { dst, .. }
+        | Action::Fold { dst, .. }
+        | Action::Repair { dst, .. }
+        | Action::RootLink { dst, .. }
+        | Action::RootFold { dst, .. }
           if skip_dsts.contains(dst) || fixup_dsts.contains(dst) =>
         {
           suppressed += 1;
@@ -1077,13 +1193,21 @@ pub fn apply_plans(
       drop_actions.insert(target.clone());
       continue;
     } else if target.exists() || target.is_symlink() {
-      fs::remove_file(target).map_err(Error::io(target))?;
+      if root_overwrites.contains(target) {
+        elevate
+          .expect("root actions require elevation (checked above)")
+          .remove(target)?;
+      } else {
+        fs::remove_file(target).map_err(Error::io(target))?;
+      }
     }
   }
 
   // 4. execute actions in order (skipping adopts that were rejected)
   for action in actions.into_iter().filter(|a| match a {
-    Action::Link { dst, .. } => !drop_actions.contains(dst),
+    Action::Link { dst, .. } | Action::RootLink { dst, .. } | Action::RootFold { dst, .. } => {
+      !drop_actions.contains(dst)
+    }
     _ => true,
   }) {
     let action = &action;
@@ -1124,11 +1248,10 @@ pub fn apply_plans(
         }
       }
       Action::SkipIdempotent { .. } => {}
-      Action::RootLink { .. } | Action::RootFold { .. } => {
-        // Root-mapped actions need write access to absolute destinations and
-        // are applied through the elevation helper in Task 19. Planning emits
-        // them here and counts them like other links; this task deliberately
-        // does not touch the filesystem for them.
+      Action::RootLink { src, dst } | Action::RootFold { src_dir: src, dst } => {
+        elevate
+          .expect("root actions require elevation (checked above)")
+          .apply_link(src, dst)?;
         out.linked += 1;
       }
     }

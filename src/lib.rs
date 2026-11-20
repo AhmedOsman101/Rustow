@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod create;
 pub mod diff;
+pub mod elevate;
 pub mod error;
 pub mod ignore;
 pub mod link;

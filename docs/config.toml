@@ -54,6 +54,11 @@ ignore = [
 #   adopt     — target's content is moved into the package; symlink
 on_conflict = "prompt"
 
+# Elevation program used ONLY for root-mapped actions (ADR 0001). It receives
+# the action as argv, e.g. `<program> ln -s <src> <dst>`. Unset = probe `sudo`,
+# then `doas`. Could be a path to a helper script (e.g. "/usr/local/bin/rustow-sudo").
+# elevate_cmd = "sudo"
+
 # Per-package settings. `includes` is a biome-style list layered over the
 # global `ignore` for ONE package: positive globs re-include paths the global
 # list hid, `!`-prefixed globs hide them again. Omitted = no change.
