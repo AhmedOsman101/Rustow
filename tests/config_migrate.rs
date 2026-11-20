@@ -331,3 +331,54 @@ fn shared_migrate_stowrc_api_returns_only_gaps() {
     Some(r.other_source.to_string_lossy().into_owned())
   );
 }
+
+#[test]
+fn missing_target_directory_is_adopted_with_a_warning() {
+  // A target that does not exist yet is fine (created on link); only the
+  // source must exist. The migration succeeds and records a warning.
+  let r = rig();
+  let missing_target = r.home.join("target-to-be-created");
+  assert!(!missing_target.exists());
+  r.write_config("");
+  r.write_stowrc(&format!(
+    "--dir={}\n--target={}\n--verbose=1\n",
+    r.source.display(),
+    missing_target.display()
+  ));
+
+  r.cmd()
+    .arg("config")
+    .arg("migrate")
+    .arg("--stowrc")
+    .arg(&r.stowrc)
+    .arg("--yes")
+    .assert()
+    .success()
+    .stderr(contains("does not exist yet"));
+
+  assert_eq!(
+    r.config_value("target")
+      .and_then(|v| v.as_str().map(str::to_owned)),
+    Some(missing_target.to_string_lossy().into_owned())
+  );
+}
+
+#[test]
+fn malformed_stowrc_missing_value_errors_and_writes_nothing() {
+  let r = rig();
+  r.write_config("verbose = true\n");
+  r.write_stowrc("# preamble\n--dir\n");
+
+  r.cmd()
+    .arg("config")
+    .arg("migrate")
+    .arg("--stowrc")
+    .arg(&r.stowrc)
+    .arg("--yes")
+    .assert()
+    .failure()
+    .stderr(contains("line 2"))
+    .stderr(contains(".stowrc"));
+
+  assert_eq!(fs::read_to_string(&r.cfg_path).unwrap(), "verbose = true\n");
+}

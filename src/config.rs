@@ -1135,10 +1135,34 @@ impl MigratePlan {
   }
 }
 
-/// Quote a string as a TOML basic string (mirrors `write_resolved`'s escaping).
+/// Quote a string as a full TOML basic string via toml's own serializer, so
+/// control characters and other edge cases are escaped correctly (not just
+/// backslashes and quotes).
 fn quote_toml_string(s: &str) -> String {
-  let esc = s.replace('\\', "\\\\").replace('"', "\\\"");
-  format!("\"{esc}\"")
+  toml::Value::String(s.to_owned()).to_string()
+}
+
+/// In the migration path only, a stowrc warning that reports a dropped/malformed
+/// value is fatal: ADR 0004 requires malformed stowrc to error cleanly with the
+/// config untouched. Unsupported-option warnings stay non-fatal (they are the
+/// runtime fallback's documented behavior and must not change here). The
+/// warning text already begins `stowrc line N:`, so the error names both the
+/// file and the line.
+fn promote_malformed_stowrc_warnings(
+  stowrc_path: &Path,
+  warnings: &[String],
+) -> Result<Vec<String>> {
+  let mut kept = Vec::with_capacity(warnings.len());
+  for w in warnings {
+    if w.contains("needs a value") {
+      return Err(Error::Config(format!(
+        "malformed stowrc {}: {w}",
+        stowrc_path.display()
+      )));
+    }
+    kept.push(w.clone());
+  }
+  Ok(kept)
 }
 
 /// Which top-level keys are explicitly present in the config text. An empty
@@ -1152,15 +1176,34 @@ fn present_top_level_keys(text: &str) -> Result<std::collections::HashSet<String
   Ok(table.into_iter().map(|(k, _)| k).collect())
 }
 
-/// A path adopted from stowrc must already be a directory. A stowrc that
-/// parses but points at a moved/deleted directory must never become a config
-/// pointing at nothing (Review Focus #2).
-fn validate_migrate_dir(path: &Path, key: &str) -> Result<()> {
+/// The adopted stow `source` must already be a directory. A stowrc that parses
+/// but points at a moved/deleted stow dir must never become a config pointing
+/// at nothing (Review Focus #2).
+fn validate_migrate_source(path: &Path, key: &str) -> Result<()> {
   if !path.is_dir() {
     return Err(Error::Config(format!(
       "stowrc {key} path {} does not exist or is not a directory — refusing to write a config pointing at nothing",
       path.display()
     )));
+  }
+  Ok(())
+}
+
+/// The adopted `target` need not exist yet — rustow creates a missing target
+/// root on link. It is only an error when the path exists but is not a
+/// directory; a missing target is reported as a warning instead.
+fn validate_migrate_target(path: &Path, warnings: &mut Vec<String>) -> Result<()> {
+  if path.exists() && !path.is_dir() {
+    return Err(Error::Config(format!(
+      "stowrc target path {} exists but is not a directory — refusing to write a config pointing at a file",
+      path.display()
+    )));
+  }
+  if !path.exists() {
+    warnings.push(format!(
+      "stowrc target {} does not exist yet — rustow will create it on link",
+      path.display()
+    ));
   }
   Ok(())
 }
@@ -1208,6 +1251,8 @@ fn merge_top_level_keys(original: &str, lines: &[String]) -> String {
 pub fn migrate_stowrc(config_path: &Path, stowrc_path: &Path) -> Result<MigratePlan> {
   let contents = fs::read_to_string(stowrc_path).map_err(Error::io(stowrc_path))?;
   let parsed = parse_stowrc(&contents)?;
+  // Malformed values are fatal only here; the runtime fallback still warns.
+  let mut warnings = promote_malformed_stowrc_warnings(stowrc_path, &parsed.warnings)?;
 
   let (config_text, config_existed) = if config_path.exists() {
     (
@@ -1223,7 +1268,7 @@ pub fn migrate_stowrc(config_path: &Path, stowrc_path: &Path) -> Result<MigrateP
   if !present.contains("source")
     && let Some(src) = &parsed.source
   {
-    validate_migrate_dir(src, "source")?;
+    validate_migrate_source(src, "source")?;
     additions.push(MigrateAddition {
       key: "source",
       value: src.to_string_lossy().into_owned(),
@@ -1233,7 +1278,7 @@ pub fn migrate_stowrc(config_path: &Path, stowrc_path: &Path) -> Result<MigrateP
   if !present.contains("target")
     && let Some(tgt) = &parsed.target
   {
-    validate_migrate_dir(tgt, "target")?;
+    validate_migrate_target(tgt, &mut warnings)?;
     additions.push(MigrateAddition {
       key: "target",
       value: tgt.to_string_lossy().into_owned(),
@@ -1254,7 +1299,7 @@ pub fn migrate_stowrc(config_path: &Path, stowrc_path: &Path) -> Result<MigrateP
     config_path: config_path.to_path_buf(),
     stowrc_path: stowrc_path.to_path_buf(),
     additions,
-    warnings: parsed.warnings,
+    warnings,
     config_existed,
   })
 }
@@ -1286,7 +1331,30 @@ mod migrate_tests {
   }
 
   #[test]
-  fn quote_toml_string_escapes_backslash_and_quote() {
-    assert_eq!(quote_toml_string("C:\\a\"b"), "\"C:\\\\a\\\"b\"");
+  fn quote_toml_string_uses_full_toml_escaping() {
+    let s = "C:\\a\"b\nc\td";
+    let quoted = quote_toml_string(s);
+    let table: toml::Table = toml::from_str(&format!("path = {quoted}\n")).unwrap();
+    assert_eq!(table.get("path").unwrap().as_str(), Some(s));
+  }
+
+  #[test]
+  fn malformed_value_warnings_are_fatal_but_unsupported_options_are_kept() {
+    let path = std::path::Path::new("/nonexistent/.stowrc");
+    let err =
+      promote_malformed_stowrc_warnings(path, &["stowrc line 7: --dir needs a value".to_string()])
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+      msg.contains("/nonexistent/.stowrc") && msg.contains("line 7"),
+      "{msg}"
+    );
+
+    let kept = promote_malformed_stowrc_warnings(
+      path,
+      &["stowrc line 2: ignoring unsupported option `--adopt`".to_string()],
+    )
+    .unwrap();
+    assert_eq!(kept.len(), 1);
   }
 }
