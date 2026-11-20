@@ -10,6 +10,13 @@
         "null"
       ]
     },
+    "elevate_cmd": {
+      "description": "Elevation program for root-mapped actions (ADR 0001). When unset, rustow\nprobes `sudo`, then `doas`. The program receives the action as its argv,\ne.g. `<program> ln -s <src> <dst>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "fold": {
       "description": "Fold package directories into single symlinks where possible.",
       "type": "boolean",
@@ -52,6 +59,13 @@
       "description": "What to do when a real file already occupies a target path.",
       "$ref": "#/$defs/ConflictPolicy",
       "default": "prompt"
+    },
+    "package": {
+      "description": "Per-package settings, keyed by package name (`[package.<name>]`).",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PackageConfig"
+      }
     },
     "source": {
       "description": "Stow directory; its direct subdirectories are the packages.\nNo default — rustow errors out until it is set.",
@@ -100,6 +114,33 @@
           "const": "adopt"
         }
       ]
+    },
+    "PackageConfig": {
+      "description": "Settings for a single package, keyed by its directory name under `source`.",
+      "type": "object",
+      "properties": {
+        "includes": {
+          "description": "Biome-style list layered over the global `ignore` for this package only.\nPositive globs re-include paths the global list hid; `!`-prefixed globs\nhide them again. Absent means this package leaves the global list alone.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "root": {
+          "description": "Absolute destinations for package-relative source paths (ADR 0001).\nKeys are package-relative paths; values are absolute after `~` expansion.\nTrailing slashes are cosmetic and normalized away at load. The file-vs-\ndirectory kind is resolved from the source path's type at plan time.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

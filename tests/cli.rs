@@ -131,6 +131,66 @@ fn relink_refreshes() {
 }
 
 #[test]
+fn relink_conflict_changes_nothing() {
+  let r = rig();
+  make_pkg(&r.source, "alpha", &[".bashrc", ".sharedrc"]);
+  make_pkg(&r.source, "beta", &[".bashrc", ".sharedrc"]);
+  r.cmd_env().args(["link", "alpha"]).assert().success();
+
+  let bashrc = r.target.join(".bashrc");
+  let sharedrc = r.target.join(".sharedrc");
+  let alpha_bashrc = fs::read_link(&bashrc).unwrap();
+  let alpha_sharedrc = fs::read_link(&sharedrc).unwrap();
+  assert!(alpha_bashrc.starts_with(r.source.join("alpha")));
+  assert!(alpha_sharedrc.starts_with(r.source.join("alpha")));
+
+  // Both packages claim the same paths; the link phase cannot resolve the
+  // conflict, so relink must abort before unlinking anything.
+  r.cmd_env()
+    .args(["relink", "alpha", "beta"])
+    .assert()
+    .code(1)
+    .stderr(contains("conflict"));
+
+  assert_eq!(fs::read_link(&bashrc).unwrap(), alpha_bashrc);
+  assert_eq!(fs::read_link(&sharedrc).unwrap(), alpha_sharedrc);
+}
+
+#[test]
+fn relink_abort_policy_changes_nothing() {
+  let r = rig();
+  make_pkg(&r.source, "alpha", &[".bashrc", ".sharedrc"]);
+  make_pkg(&r.source, "beta", &[".bashrc", ".sharedrc"]);
+  fs::create_dir_all(r.xdg.join("rustow")).unwrap();
+  fs::write(
+    r.xdg.join("rustow/config.toml"),
+    format!(
+      "source = \"{}\"\ntarget = \"{}\"\non_conflict = \"abort\"\n",
+      r.source.display(),
+      r.target.display()
+    ),
+  )
+  .unwrap();
+  r.cmd().args(["link", "alpha"]).assert().success();
+
+  let bashrc = r.target.join(".bashrc");
+  let sharedrc = r.target.join(".sharedrc");
+  let alpha_bashrc = fs::read_link(&bashrc).unwrap();
+  let alpha_sharedrc = fs::read_link(&sharedrc).unwrap();
+
+  // An abort policy never resolves a conflict, so relink must detect it
+  // before unlinking — on a TTY too, where Prompt would defer.
+  r.cmd()
+    .args(["relink", "alpha", "beta"])
+    .assert()
+    .code(1)
+    .stderr(contains("conflict"));
+
+  assert_eq!(fs::read_link(&bashrc).unwrap(), alpha_bashrc);
+  assert_eq!(fs::read_link(&sharedrc).unwrap(), alpha_sharedrc);
+}
+
+#[test]
 fn dry_run_changes_nothing() {
   let r = rig();
   make_pkg(&r.source, "zsh", &[".zshrc"]);

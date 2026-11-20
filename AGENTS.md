@@ -59,4 +59,5 @@ Behavior to know:
 
 - `tests/` — integration tests drive tempdir fixtures only; set `HOME`, `DOTFILES_DIR`/`DOTFILES_TARGET` (or `XDG_CONFIG_HOME`) per fixture; never the real environment. A prior fixture leaked `$HOME` and ran the binary against the real stowrc — don't reintroduce that.
 - `tests/regression.rs` pins review findings; `tests/e2e.sh` is the container scenario.
-- Commits use Conventional Commits. `husky-rs` (regular dependency) is the user's git-hooks tooling — theirs, leave it alone.
+- Commits use Conventional Commits.
+- `husky-rs` (regular dependency) works at build/test time via the crate's own `build.rs` (sets `core.hooksPath` to `.husky/`); this is the user's hook tooling — leave alone.

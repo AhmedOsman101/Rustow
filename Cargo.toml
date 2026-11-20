@@ -22,9 +22,12 @@ owo-colors = { version = "4", features = ["supports-color"] }
 dialoguer = "0.12"
 thiserror = "2"
 dirs = "7"
+libc = "0.2"
 husky-rs = "0.4.0"
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+proptest = "1"
+portable-pty = "0.9"

@@ -1,16 +1,18 @@
 //! clap definitions and dispatch.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::{self, CliOverrides};
+use crate::elevate::{self, Elevation};
 use crate::error::{Error, Result};
 use crate::ignore::Ignore;
 use crate::link::{
   self, AbortResolver, ConflictResolution, ConflictResolver, FixedResolver, LinkInput,
-  PromptOutcome,
+  PromptOutcome, RootMappings,
 };
 
 #[derive(Debug, Parser)]
@@ -45,6 +47,11 @@ pub struct GlobalArgs {
   /// Verbose output (-v per-package detail, -vv uncapped).
   #[arg(short, long, global = true, action = clap::ArgAction::Count)]
   pub verbose: u8,
+
+  /// Authorize elevated root-mapped actions non-interactively (ADR 0001).
+  /// Without this, root-mapped actions prompt on a TTY and abort on non-TTY.
+  #[arg(long, global = true)]
+  pub as_root: bool,
 
   /// Never read ~/.stowrc, even when no config file exists (overrides the fallback;
   /// can also be set with RUSTOW_NO_STOWRC=1).
@@ -177,9 +184,21 @@ pub enum ConfigCommands {
     /// Overwrite an existing config file.
     #[arg(long)]
     force: bool,
+    /// Adopt values from ~/.stowrc without prompting.
+    #[arg(long)]
+    yes: bool,
     /// Write to a custom path instead of the default location.
     #[arg(long, value_name = "PATH")]
     path: Option<PathBuf>,
+  },
+  /// Adopt values from ~/.stowrc into config.toml (ADR 0004).
+  Migrate {
+    /// Adopt without prompting.
+    #[arg(long)]
+    yes: bool,
+    /// Read stowrc from a custom path instead of ~/.stowrc.
+    #[arg(long, value_name = "PATH", hide = true)]
+    stowrc: Option<PathBuf>,
   },
 }
 
@@ -196,6 +215,72 @@ pub fn list_packages(source: &Path) -> Result<Vec<String>> {
   }
   out.sort();
   Ok(out)
+}
+
+/// Collect `[package.<name>.root]` tables from the resolved config. Values are
+/// already normalized to absolute paths by the config loader.
+fn root_mappings(cfg: &config::Config) -> RootMappings {
+  cfg
+    .package
+    .iter()
+    .filter_map(|(pkg, pc)| pc.root.as_ref().map(|roots| (pkg.clone(), roots.clone())))
+    .collect()
+}
+
+/// Authorize + probe + preflight, in that order, so a non-TTY run without
+/// `--as-root` always fails with the `--as-root` hint even if elevation is
+/// also unavailable. Nothing mutates the filesystem here.
+fn prepare_elevation(
+  descriptions: Vec<String>,
+  dsts: HashSet<PathBuf>,
+  configured: Option<&str>,
+  as_root: bool,
+) -> Result<Elevation> {
+  elevate::authorize(&descriptions, as_root)?;
+  let elevation = Elevation::probe(configured)?;
+  elevation.preflight(&dsts)?;
+  Ok(elevation)
+}
+
+/// Build the elevation context for a set of plans through the same
+/// authorize -> probe -> preflight gate as `link`. Returns `None` on a dry run
+/// or when no plan carries root destinations. Shared with `create` so a
+/// root-mapped package linked during creation follows the identical path.
+pub(crate) fn prepare_elevation_for_plans(
+  plans: &[link::Plan],
+  configured: Option<&str>,
+  as_root: bool,
+  dry_run: bool,
+) -> Result<Option<Elevation>> {
+  let root_dsts: HashSet<PathBuf> = plans
+    .iter()
+    .flat_map(|p| p.root_dsts.iter().cloned())
+    .collect();
+  if dry_run || root_dsts.is_empty() {
+    return Ok(None);
+  }
+  let mut descriptions = Vec::new();
+  for plan in plans {
+    for action in &plan.actions {
+      if matches!(
+        action,
+        link::Action::RootLink { .. } | link::Action::RootFold { .. }
+      ) {
+        descriptions.push(render_action(action));
+      }
+    }
+    for conflict in &plan.conflicts {
+      if plan.root_dsts.contains(&conflict.dst) {
+        descriptions.push(format!("resolve root conflict {}", conflict.dst.display()));
+      }
+    }
+  }
+  Ok(Some(prepare_elevation(
+    descriptions,
+    root_dsts,
+    configured,
+    as_root,
+  )?))
 }
 
 struct App<'a> {
@@ -215,7 +300,7 @@ impl<'a> App<'a> {
   }
 
   fn ignore(&self) -> Result<Ignore> {
-    Ignore::new(&self.resolved.cfg.ignore)
+    Ignore::with_packages(&self.resolved.cfg.ignore, &self.resolved.cfg.package)
   }
 
   fn source(&self) -> &Path {
@@ -255,21 +340,36 @@ impl<'a> App<'a> {
 
   fn link_pkgs(&self, pkgs: &[String]) -> Result<i32> {
     let ignore = self.ignore()?;
-    let plans = link::plan_link_all(&LinkInput {
-      source: self.source(),
-      target: self.target(),
-      pkgs,
-      fold: self.resolved.cfg.fold,
-      fold_ignore: &self.resolved.cfg.fold_ignore,
-      ignore: &ignore,
-    })?;
+    let roots = root_mappings(&self.resolved.cfg);
+    let plans = link::plan_link_all_with_roots(
+      &LinkInput {
+        source: self.source(),
+        target: self.target(),
+        pkgs,
+        fold: self.resolved.cfg.fold,
+        fold_ignore: &self.resolved.cfg.fold_ignore,
+        ignore: &ignore,
+      },
+      &roots,
+    )?;
+
+    // Root-mapped actions are authorized + preflighted before anything is
+    // applied. Dry run never prompts and never elevates (dry-run wins, even
+    // with --as-root).
+    let elevation = prepare_elevation_for_plans(
+      &plans,
+      self.resolved.cfg.elevate_cmd.as_deref(),
+      self.globals.as_root,
+      self.globals.dry_run,
+    )?;
 
     let mut resolver = self.make_resolver();
-    match link::apply_plans(
+    match link::apply_plans_with_elevation(
       &plans,
       self.source(),
       resolver.as_mut(),
       self.globals.dry_run,
+      elevation.as_ref(),
     ) {
       Ok(out) => {
         if self.resolved.cfg.verbose || self.globals.verbose > 0 {
@@ -299,9 +399,61 @@ impl<'a> App<'a> {
     }
   }
 
+  /// Absolute root destinations that currently hold one of our links, for the
+  /// packages being unlinked. If a mapped source has vanished, the source type
+  /// can no longer be derived, so both the exact value and the directory-style
+  /// `<value>/<basename(key)>` are checked against what is on disk (ADR 0001).
+  fn root_unlink_dests(&self, pkgs: &[String]) -> Result<Vec<PathBuf>> {
+    let roots = root_mappings(&self.resolved.cfg);
+    let mut out = Vec::new();
+    for pkg in pkgs {
+      let pkg_root = self.source().join(pkg);
+      let Some(mappings) = roots.get(pkg) else {
+        continue;
+      };
+      for (key, value) in mappings {
+        for dst in link::root_dest_candidates(pkg, &pkg_root, key, value) {
+          let Ok(raw) = fs::read_link(&dst) else {
+            continue;
+          };
+          let abs = if raw.is_absolute() {
+            raw
+          } else {
+            dst.parent().unwrap_or_else(|| Path::new(".")).join(raw)
+          };
+          if link::lexical_normalize(&abs).starts_with(&pkg_root) && !out.contains(&dst) {
+            out.push(dst);
+          }
+        }
+      }
+    }
+    Ok(out)
+  }
+
   fn unlink_pkgs(&self, pkgs: &[String]) -> Result<i32> {
     let ignore = self.ignore()?;
-    let plan = link::plan_unlink(self.source(), self.target(), pkgs, &ignore, false)?;
+    let roots = root_mappings(&self.resolved.cfg);
+    let plan =
+      link::plan_unlink_with_roots(self.source(), self.target(), pkgs, &ignore, false, &roots)?;
+    let root_links = self.root_unlink_dests(pkgs)?;
+
+    // Same authorization/preflight as linking, before any mutation.
+    let elevation = if self.globals.dry_run || root_links.is_empty() {
+      None
+    } else {
+      let descriptions: Vec<String> = root_links
+        .iter()
+        .map(|dst| format!("unlink {}", dst.display()))
+        .collect();
+      let dsts: HashSet<PathBuf> = root_links.iter().cloned().collect();
+      Some(prepare_elevation(
+        descriptions,
+        dsts,
+        self.resolved.cfg.elevate_cmd.as_deref(),
+        self.globals.as_root,
+      )?)
+    };
+
     let n = link::apply_unlink(
       &plan,
       self.target(),
@@ -309,6 +461,19 @@ impl<'a> App<'a> {
       &ignore,
       self.globals.dry_run,
     )?;
+    // A dry run reports the root links it would remove but never elevates.
+    let root_removed = if self.globals.dry_run {
+      root_links.len()
+    } else {
+      let mut count = 0usize;
+      if let Some(elev) = &elevation {
+        for dst in &root_links {
+          elev.remove(dst)?;
+          count += 1;
+        }
+      }
+      count
+    };
     let verb = if self.globals.dry_run {
       "would unlink"
     } else {
@@ -319,9 +484,13 @@ impl<'a> App<'a> {
         let link::UnlinkAction::Unlink { dst } = action;
         println!("unlink {}", dst.display());
       }
+      for dst in &root_links {
+        println!("{verb} {}", dst.display());
+      }
     }
     println!(
-      "{verb} {n} link(s){}",
+      "{verb} {} link(s){}",
+      n + root_removed,
       if plan.foreign_skipped.is_empty() {
         String::new()
       } else {
@@ -332,6 +501,67 @@ impl<'a> App<'a> {
       }
     );
     Ok(0)
+  }
+
+  /// Detect an unresolvable link-phase conflict before `relink` unlinks
+  /// anything. Detection must be side-effect free: the single real
+  /// resolution happens in `link_pkgs` after the unlink.
+  fn check_link_conflicts(&self, pkgs: &[String]) -> Result<()> {
+    use crate::config::ConflictPolicy;
+    use std::io::IsTerminal;
+
+    // Only policies that actually *resolve* a conflict get their one real
+    // resolution in `link_pkgs`: `-f`/`--adopt` and Skip/Overwrite/Adopt.
+    // Deciding here too would discard the first decision. `Abort` never
+    // resolves — it must abort before the unlink, even on a TTY.
+    if self.globals.force
+      || self.globals.adopt
+      || matches!(
+        self.resolved.cfg.on_conflict,
+        ConflictPolicy::Skip | ConflictPolicy::Overwrite | ConflictPolicy::Adopt
+      )
+    {
+      return Ok(());
+    }
+    // Only the interactive Prompt policy can ask questions or run a merge
+    // tool; never invoke it here. Leave its one real resolution to `link_pkgs`.
+    if matches!(self.resolved.cfg.on_conflict, ConflictPolicy::Prompt)
+      && std::io::stdin().is_terminal()
+    {
+      return Ok(());
+    }
+
+    let ignore = self.ignore()?;
+    let roots = root_mappings(&self.resolved.cfg);
+    let plans = link::plan_link_all_with_roots(
+      &LinkInput {
+        source: self.source(),
+        target: self.target(),
+        pkgs,
+        fold: self.resolved.cfg.fold,
+        fold_ignore: &self.resolved.cfg.fold_ignore,
+        ignore: &ignore,
+      },
+      &roots,
+    )?;
+
+    // Pure abort-style detection: `AbortResolver` only returns Abort — no
+    // prompt, no filesystem change — so a conflict aborts while the tree is
+    // intact. Covers the Abort policy on any TTY and Prompt on a non-TTY.
+    let mut detector = AbortResolver;
+    let mut outcomes = Vec::new();
+    for plan in &plans {
+      for conflict in &plan.conflicts {
+        outcomes.push((conflict.clone(), detector.resolve(conflict)?));
+      }
+    }
+    if outcomes
+      .iter()
+      .all(|(_, outcome)| *outcome != PromptOutcome::Abort)
+    {
+      return Ok(());
+    }
+    Err(Error::Conflicts(link::render_conflict_report(&outcomes)))
   }
 }
 
@@ -345,6 +575,12 @@ fn render_action(action: &link::Action) -> String {
     link::Action::Unfold { dst } => format!("unfold {}", dst.display()),
     link::Action::Repair { src, dst } => format!("repair {} -> {}", dst.display(), src.display()),
     link::Action::SkipIdempotent { .. } => "skip  (already linked)".to_string(),
+    link::Action::RootLink { src, dst } => {
+      format!("root link {} -> {}", dst.display(), src.display())
+    }
+    link::Action::RootFold { src_dir, dst } => {
+      format!("root fold {} -> {}", dst.display(), src_dir.display())
+    }
   }
 }
 
@@ -416,6 +652,44 @@ impl ConflictResolver for PromptResolver {
   }
 }
 
+/// Read a one-letter answer on stdin. A simple line reader (not dialoguer)
+/// keeps the prompt drivable through the real binary with piped stdin; EOF
+/// takes the conservative choice (skip / keep defaults).
+fn prompt_choice(prompt: &str) -> Result<bool> {
+  use std::io::{BufRead, Write};
+
+  print!("{prompt}");
+  std::io::stdout()
+    .flush()
+    .map_err(|e| Error::Message(format!("failed to flush prompt: {e}")))?;
+  let mut line = String::new();
+  let n = std::io::stdin()
+    .lock()
+    .read_line(&mut line)
+    .map_err(|e| Error::Message(format!("failed to read prompt answer: {e}")))?;
+  if n == 0 {
+    return Ok(false);
+  }
+  Ok(matches!(
+    line.trim().to_ascii_lowercase().as_str(),
+    "a" | "adopt"
+  ))
+}
+
+/// Shared opening of both adoption prompts (ADR 0004); the final choice token
+/// stays specific to each entry point.
+const ADOPT_PROMPT_PREFIX: &str = "adopt these values into config.toml? [a]dopt / ";
+
+/// Ask `[a]dopt / [s]kip` (`config migrate`).
+fn prompt_adopt() -> Result<bool> {
+  prompt_choice(&format!("{ADOPT_PROMPT_PREFIX}[s]kip: "))
+}
+
+/// Ask `[a]dopt / [k]eep defaults` (`config init`), reusing the same reader.
+fn prompt_init_adopt() -> Result<bool> {
+  prompt_choice(&format!("{ADOPT_PROMPT_PREFIX}[k]eep defaults: "))
+}
+
 pub fn run(cli: Cli) -> Result<i32> {
   match cli.command {
     Commands::Config(cmd) => match cmd {
@@ -423,10 +697,70 @@ pub fn run(cli: Cli) -> Result<i32> {
         print!("{}", config::print_default());
         Ok(0)
       }
-      ConfigCommands::Init { force, path } => {
+      ConfigCommands::Init { force, yes, path } => {
         let path = path.unwrap_or_else(config::config_path);
+        let stowrc_path = config::stowrc_path();
+        // The automatic offer must honor both shipped kill-switches; an
+        // explicit `config migrate` still reads a stowrc when asked.
+        let stowrc_off = cli.global.no_stowrc || config::env_no_stowrc();
+        if !stowrc_off && stowrc_path.exists() {
+          // Same shared seam as `config migrate`. With --force the config is
+          // being replaced, so plan against an empty destination: an old
+          // file's keys must not suppress stowrc values we are about to write.
+          let plan = if force {
+            config::migrate_stowrc_for_fresh(&path, &stowrc_path)?
+          } else {
+            config::migrate_stowrc(&path, &stowrc_path)?
+          };
+          for w in &plan.warnings {
+            eprintln!("rustow: warning: {w}");
+          }
+          if !plan.is_empty() {
+            print!("{}", plan.render_diff());
+            if yes || prompt_init_adopt()? {
+              let written = config::write_default_with_adopted(&path, force, &plan)?;
+              println!("wrote {}", written.display());
+              println!(
+                "note: stowrc left untouched — you can remove it now ({} is inert once config.toml exists)",
+                stowrc_path.display()
+              );
+              return Ok(0);
+            }
+            println!("skipped — keeping defaults");
+          }
+        }
         let written = config::write_default(&path, force)?;
         println!("wrote {}", written.display());
+        Ok(0)
+      }
+      ConfigCommands::Migrate { yes, stowrc } => {
+        // Reuse the global --dry-run flag; Migrate has no flag of its own.
+        let dry_run = cli.global.dry_run;
+        let stowrc_path = stowrc.unwrap_or_else(config::stowrc_path);
+        let config_path = config::config_path();
+        let plan = config::migrate_stowrc(&config_path, &stowrc_path)?;
+        for w in &plan.warnings {
+          eprintln!("rustow: warning: {w}");
+        }
+        if plan.is_empty() {
+          println!("nothing to adopt — config already sets every value stowrc can supply");
+          return Ok(0);
+        }
+        print!("{}", plan.render_diff());
+        if dry_run {
+          println!("dry run: no files changed");
+          return Ok(0);
+        }
+        if yes || prompt_adopt()? {
+          let written = plan.apply()?;
+          println!("wrote {}", written.display());
+          println!(
+            "note: stowrc left untouched — you can remove it now ({} is inert once config.toml exists)",
+            stowrc_path.display()
+          );
+        } else {
+          println!("skipped — config unchanged");
+        }
         Ok(0)
       }
     },
@@ -459,7 +793,34 @@ pub fn run(cli: Cli) -> Result<i32> {
     Commands::Clean => {
       let app = App::new(&cli.global)?;
       let ignore = app.ignore()?;
-      let plan = link::plan_clean(app.source(), app.target(), &ignore)?;
+      let roots = root_mappings(&app.resolved.cfg);
+      let plan = link::plan_clean_with_roots(app.source(), app.target(), &ignore, &roots)?;
+      let root_dsts: Vec<PathBuf> = plan
+        .root_actions
+        .iter()
+        .map(|action| match action {
+          link::UnlinkAction::Unlink { dst } => dst.clone(),
+        })
+        .collect();
+
+      // Same gate as unlink: authorize → probe → preflight runs before ANY
+      // filesystem mutation, including the ordinary unprivileged sweep.
+      let elevation = if cli.global.dry_run || root_dsts.is_empty() {
+        None
+      } else {
+        let descriptions: Vec<String> = root_dsts
+          .iter()
+          .map(|dst| format!("clean {}", dst.display()))
+          .collect();
+        let dsts: HashSet<PathBuf> = root_dsts.iter().cloned().collect();
+        Some(prepare_elevation(
+          descriptions,
+          dsts,
+          app.resolved.cfg.elevate_cmd.as_deref(),
+          cli.global.as_root,
+        )?)
+      };
+
       let n = link::apply_unlink(
         &plan,
         app.target(),
@@ -467,6 +828,18 @@ pub fn run(cli: Cli) -> Result<i32> {
         &ignore,
         cli.global.dry_run,
       )?;
+      let root_removed = if cli.global.dry_run {
+        root_dsts.len()
+      } else {
+        let mut count = 0usize;
+        if let Some(elev) = &elevation {
+          for dst in &root_dsts {
+            elev.remove(dst)?;
+            count += 1;
+          }
+        }
+        count
+      };
       let verb = if cli.global.dry_run {
         "would delete"
       } else {
@@ -477,12 +850,21 @@ pub fn run(cli: Cli) -> Result<i32> {
           let link::UnlinkAction::Unlink { dst } = action;
           println!("{verb} {}", dst.display());
         }
+        for dst in &root_dsts {
+          println!("{verb} {}", dst.display());
+        }
       }
-      println!("{verb} {n} broken link(s)");
+      println!("{verb} {} broken link(s)", n + root_removed);
       Ok(0)
     }
     Commands::Relink { pkgs } => {
       let app = App::new(&cli.global)?;
+      // Detect a fatal link-phase conflict before the unlink (F2), leaving
+      // the current links intact. Resolving policies and TTY prompts defer to
+      // the single real resolution in `link_pkgs`; a dry run changes nothing.
+      if !cli.global.dry_run {
+        app.check_link_conflicts(&pkgs)?;
+      }
       // unlink first (never conflicts), then link
       let _ = app.unlink_pkgs(&pkgs)?;
       app.link_pkgs(&pkgs)
@@ -503,7 +885,10 @@ pub fn run(cli: Cli) -> Result<i32> {
         fold: app_state.resolved.cfg.fold,
         fold_ignore: app_state.resolved.cfg.fold_ignore.clone(),
         ignore_globs: app_state.resolved.cfg.ignore.clone(),
+        package: app_state.resolved.cfg.package.clone(),
         conflict_resolver: app_state.make_resolver(),
+        elevate_cmd: app_state.resolved.cfg.elevate_cmd.clone(),
+        as_root: cli.global.as_root,
       };
       let opts = crate::create::CreateOptions {
         app,
@@ -531,7 +916,13 @@ pub fn run(cli: Cli) -> Result<i32> {
       } else {
         pkgs
       };
-      let mut packages = crate::status::compute_many(app.source(), app.target(), &pkgs, &ignore)?;
+      let mut packages = crate::status::compute_many(
+        app.source(),
+        app.target(),
+        &pkgs,
+        &ignore,
+        &root_mappings(&app.resolved.cfg),
+      )?;
       let had_packages = !packages.is_empty();
       if !states.is_empty() {
         packages.retain(|p| states.iter().any(|s| s.matches(p.status)));
@@ -583,7 +974,9 @@ pub fn main_entry() -> i32 {
       eprintln!("{report}");
       1
     }
-    Err(Error::Aborted) => 2,
+    // ADR 0003: every failure that is not a clap usage error is code 1.
+    // `Error::Aborted` (the user declining an interactive prompt) is no
+    // exception — it falls through here so stderr still names the reason.
     Err(e) => {
       eprintln!("error: {e}");
       1
