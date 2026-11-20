@@ -180,6 +180,24 @@ fn folded_package_reports_fully_linked() {
 }
 
 #[test]
+fn status_fold_pointing_at_wrong_subtree_is_conflict() {
+  let r = rig();
+  // pkg has two subtrees under .config; craft a fold link that resolves to the
+  // wrong one (.config/b) rather than the whole .config directory.
+  make_pkg(&r.source, "pkg", &[".config/a", ".config/b/nested"]);
+  let wrong_fold = r.source.join("pkg/.config/b");
+  std::os::unix::fs::symlink(&wrong_fold, r.target.join(".config")).unwrap();
+
+  let out = r.cmd().args(["status", "-v", "pkg"]).assert().failure();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("conflict"), "expected conflict, got: {text}");
+  assert!(
+    text.contains(&format!("fold points at {}", wrong_fold.display())),
+    "reason should name the wrong fold target, got: {text}"
+  );
+}
+
+#[test]
 fn dangling_link_counts_as_not_linked_not_crash() {
   let r = rig();
   make_pkg(&r.source, "zsh", &[".zshrc"]);

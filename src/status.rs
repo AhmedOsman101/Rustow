@@ -116,17 +116,39 @@ pub fn compute_package(
     }
     let dst = target.join(&entry.pkg_rel);
     if entry.kind == EntryKind::Dir {
-      if dst.is_symlink() && is_pkg_link(&dst, &pkg_root) && fs::metadata(&dst).is_ok() {
-        // folded link — covers the whole subtree
-        covered_prefixes.push(format!("{rel}/"));
-        linked += 1;
-      } else if dst.is_symlink() && is_pkg_link(&dst, &pkg_root) {
-        // dangling fold — the subtree is NOT reachable through it; children report individually
-        conflicts += 1;
-        issues.push(EntryIssue {
-          target: dst.display().to_string(),
-          reason: "dangling fold link".to_string(),
-        });
+      if dst.is_symlink() {
+        let expected = lexical_normalize(&pkg_root.join(&entry.pkg_rel));
+        match resolve_link(&dst) {
+          Some(rl) if rl == expected => {
+            if fs::metadata(&dst).is_ok() {
+              // folded link — covers the whole subtree
+              covered_prefixes.push(format!("{rel}/"));
+              linked += 1;
+            } else {
+              // dangling fold — the subtree is NOT reachable through it
+              conflicts += 1;
+              issues.push(EntryIssue {
+                target: dst.display().to_string(),
+                reason: "dangling fold link".to_string(),
+              });
+            }
+          }
+          Some(rl) => {
+            // fold resolves to a different subtree — status and the planner disagree
+            conflicts += 1;
+            issues.push(EntryIssue {
+              target: dst.display().to_string(),
+              reason: format!("fold points at {}", rl.display()),
+            });
+          }
+          None => {
+            conflicts += 1;
+            issues.push(EntryIssue {
+              target: dst.display().to_string(),
+              reason: "unreadable fold link".to_string(),
+            });
+          }
+        }
       }
       // real dir (or missing) — children are checked individually
       continue;
