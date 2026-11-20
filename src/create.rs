@@ -265,6 +265,28 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
   Ok(())
 }
 
+/// If `candidate` resolves (lexically or, when it exists, through symlinks) to
+/// a path inside the source tree, return the owning package name. Under a fold,
+/// `target/.config/<app>` is a symlink into another package's tree — adopting it
+/// would silently relocate that package's files.
+fn package_owning_path(ctx: &CreateContext, candidate: &Path) -> Option<String> {
+  let source_lex = crate::link::lexical_normalize(&ctx.source_dir);
+  let source_canon = fs::canonicalize(&ctx.source_dir).unwrap_or_else(|_| source_lex.clone());
+  let candidate_lex = crate::link::lexical_normalize(candidate);
+  let candidate_canon = fs::canonicalize(candidate).unwrap_or_else(|_| candidate_lex.clone());
+
+  for root in [&source_lex, &source_canon] {
+    for resolved in [&candidate_lex, &candidate_canon] {
+      if let Ok(rel) = resolved.strip_prefix(root)
+        && let Some(std::path::Component::Normal(name)) = rel.components().next()
+      {
+        return Some(name.to_string_lossy().into_owned());
+      }
+    }
+  }
+  None
+}
+
 pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<CreateOutcome> {
   let app = &opts.app;
   if app.contains('/') || app.contains('\\') || app == "." || app == ".." || app.is_empty() {
@@ -290,16 +312,32 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
   let pkg = pkg_dir(ctx, app);
   let dst = dst_for(ctx, app, relpath);
   let src = src_for(ctx, app, relpath, opts.source.as_deref());
-  // --source must never be the package dir, the package's ancestors (incl. source root), or inside it
+  // --source must never be the package dir, the package's ancestors (incl. source root), or inside it.
+  // Compare both lexically and (when the paths exist) through symlinks.
   if let Some(explicit) = opts.source.as_ref() {
-    let pkg_norm = crate::link::lexical_normalize(&pkg);
-    let src_norm = crate::link::lexical_normalize(explicit);
-    if src_norm == pkg_norm || src_norm.starts_with(&pkg_norm) || pkg_norm.starts_with(&src_norm) {
+    let pkg_lex = crate::link::lexical_normalize(&pkg);
+    let src_lex = crate::link::lexical_normalize(explicit);
+    let pkg_canon = fs::canonicalize(&pkg).unwrap_or_else(|_| pkg_lex.clone());
+    let src_canon = fs::canonicalize(explicit).unwrap_or_else(|_| src_lex.clone());
+    let overlaps = |a: &Path, b: &Path| a == b || a.starts_with(b) || b.starts_with(a);
+    if overlaps(&src_lex, &pkg_lex) || overlaps(&src_canon, &pkg_canon) {
       return Err(Error::Message(format!(
         "--source {} must not be the package itself or an ancestor of it",
         explicit.display()
       )));
     }
+  }
+
+  // Never adopt a path that actually lives inside the source tree: it belongs
+  // to a package, and moving it would relocate that package's files. Resolve
+  // the effective source lexically AND through symlinks (a folded ~/.config).
+  if !opts.empty
+    && let Some(owner) = package_owning_path(ctx, &src)
+  {
+    return Err(Error::Message(format!(
+      "source {} is inside the source tree and belongs to package {owner:?}; refusing to adopt a path already managed by a package",
+      src.display()
+    )));
   }
 
   // both flags → error
