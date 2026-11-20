@@ -235,6 +235,20 @@ fn create_verbose_shows_files() {
   let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
   assert!(stderr.contains("a.vim"));
   assert!(stderr.contains("b.vim"));
+  // -v emits one indented, size-annotated list line per moved file (§5.2.3).
+  let listed: Vec<&str> = stderr
+    .lines()
+    .filter(|line| line.starts_with("  "))
+    .collect();
+  assert_eq!(listed.len(), 2, "stderr: {stderr}");
+  for file in ["a.vim", "b.vim"] {
+    assert!(
+      listed
+        .iter()
+        .any(|line| line.contains(file) && line.contains('(') && line.contains(')')),
+      "expected an indented '  <file> (<size>)' list line for {file:?}; stderr: {stderr}"
+    );
+  }
 }
 
 #[test]
