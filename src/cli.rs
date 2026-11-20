@@ -334,10 +334,28 @@ impl<'a> App<'a> {
     Ok(0)
   }
 
-  /// Plan the link phase against the current tree and refuse to proceed when
-  /// a conflict cannot be resolved. `relink` unlinks before it links, so a
-  /// conflict found only afterwards would leave the target empty.
+  /// Detect an unresolvable link-phase conflict before `relink` unlinks
+  /// anything. Detection must be side-effect free: the single real
+  /// resolution happens in `link_pkgs` after the unlink.
   fn check_link_conflicts(&self, pkgs: &[String]) -> Result<()> {
+    use crate::config::ConflictPolicy;
+    use std::io::IsTerminal;
+
+    // A fixed policy (`-f`/`--adopt`, or any non-prompt `on_conflict`) gets
+    // its one real resolution in `link_pkgs`. Resolving here as well would
+    // decide the same conflict twice and discard the first decision.
+    if self.globals.force
+      || self.globals.adopt
+      || !matches!(self.resolved.cfg.on_conflict, ConflictPolicy::Prompt)
+    {
+      return Ok(());
+    }
+    // The prompt resolver can ask questions and run a merge tool; never
+    // invoke it here. Leave the one interactive resolution to `link_pkgs`.
+    if std::io::stdin().is_terminal() {
+      return Ok(());
+    }
+
     let ignore = self.ignore()?;
     let plans = link::plan_link_all(&LinkInput {
       source: self.source(),
@@ -348,11 +366,13 @@ impl<'a> App<'a> {
       ignore: &ignore,
     })?;
 
-    let mut resolver = self.make_resolver();
+    // No override, non-TTY: `AbortResolver` only returns Abort — no prompt,
+    // no filesystem change — so a conflict aborts while the tree is intact.
+    let mut detector = AbortResolver;
     let mut outcomes = Vec::new();
     for plan in &plans {
       for conflict in &plan.conflicts {
-        outcomes.push((conflict, resolver.resolve(conflict)?));
+        outcomes.push((conflict.clone(), detector.resolve(conflict)?));
       }
     }
     if outcomes
@@ -361,17 +381,7 @@ impl<'a> App<'a> {
     {
       return Ok(());
     }
-
-    // Mirror `link::render_conflict_report` so this abort reads the same as a
-    // conflict found during an ordinary link.
-    let mut report = String::from("rustow: conflicts detected — nothing was changed:\n");
-    for (conflict, _) in outcomes {
-      report.push_str(&format!("  {conflict}\n"));
-      if let Some(detail) = &conflict.detail {
-        report.push_str(&format!("      existing target: {}\n", detail.display()));
-      }
-    }
-    Err(Error::Conflicts(report))
+    Err(Error::Conflicts(link::render_conflict_report(&outcomes)))
   }
 }
 
@@ -523,9 +533,9 @@ pub fn run(cli: Cli) -> Result<i32> {
     }
     Commands::Relink { pkgs } => {
       let app = App::new(&cli.global)?;
-      // Plan the link phase first: an unresolved conflict must abort before
-      // the unlink, leaving the current links intact. A dry run never touches
-      // the tree, so it keeps its report-only behaviour.
+      // Detect a fatal link-phase conflict before the unlink (F2), leaving
+      // the current links intact. Fixed policies and TTY prompts defer to the
+      // single real resolution in `link_pkgs`; a dry run changes nothing.
       if !cli.global.dry_run {
         app.check_link_conflicts(&pkgs)?;
       }

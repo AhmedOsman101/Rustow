@@ -1019,7 +1019,7 @@ fn is_owned_link(dst: &Path, source: &Path) -> bool {
     .unwrap_or(false)
 }
 
-fn render_conflict_report(outcomes: &[(Conflict, PromptOutcome)]) -> String {
+pub(crate) fn render_conflict_report(outcomes: &[(Conflict, PromptOutcome)]) -> String {
   let mut out = String::from("rustow: conflicts detected — nothing was changed:\n");
   for (c, _) in outcomes {
     out.push_str(&format!("  {c}\n"));
