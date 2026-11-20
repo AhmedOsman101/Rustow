@@ -313,10 +313,10 @@ fn expand_tilde_and_vars(s: &str) -> String {
   while i < bytes.len() {
     match bytes[i] {
       b'\\' => {
-        // backslash escapes the next byte, if any
-        if i + 1 < bytes.len() {
-          out.push(bytes[i + 1] as char);
-          i += 2;
+        // backslash escapes the next code point, if any
+        if let Some(c) = s[i + 1..].chars().next() {
+          out.push(c);
+          i += 1 + c.len_utf8();
         } else {
           out.push('\\');
           i += 1;
@@ -844,6 +844,18 @@ mod task3_tests {
       parsed.source.as_deref(),
       Some(std::path::Path::new("~/dotfiles/Configs"))
     );
+  }
+
+  #[test]
+  fn stowrc_escaped_non_ascii_codepoint() {
+    // A doubled backslash in the file survives shlex as one literal `\`, so
+    // expand_tilde_and_vars sees `\é` and must escape the whole code point.
+    let parsed = parse_stowrc("--dir=\\\\é/dotfiles\n").unwrap();
+    let source = parsed.source.unwrap();
+    assert_eq!(source.to_str(), Some("é/dotfiles"));
+    // Byte-wise escaping would yield Latin-1 "Ã" plus a stray "©".
+    let shown = source.to_string_lossy();
+    assert!(!shown.contains('Ã') && !shown.contains('©'));
   }
 
   #[test]
