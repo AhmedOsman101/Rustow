@@ -403,7 +403,9 @@ impl<'a> App<'a> {
 
   fn unlink_pkgs(&self, pkgs: &[String]) -> Result<i32> {
     let ignore = self.ignore()?;
-    let plan = link::plan_unlink(self.source(), self.target(), pkgs, &ignore, false)?;
+    let roots = root_mappings(&self.resolved.cfg);
+    let plan =
+      link::plan_unlink_with_roots(self.source(), self.target(), pkgs, &ignore, false, &roots)?;
     let root_links = self.root_unlink_dests(pkgs)?;
 
     // Same authorization/preflight as linking, before any mutation.
@@ -737,7 +739,13 @@ pub fn run(cli: Cli) -> Result<i32> {
       } else {
         pkgs
       };
-      let mut packages = crate::status::compute_many(app.source(), app.target(), &pkgs, &ignore)?;
+      let mut packages = crate::status::compute_many(
+        app.source(),
+        app.target(),
+        &pkgs,
+        &ignore,
+        &root_mappings(&app.resolved.cfg),
+      )?;
       let had_packages = !packages.is_empty();
       if !states.is_empty() {
         packages.retain(|p| states.iter().any(|s| s.matches(p.status)));

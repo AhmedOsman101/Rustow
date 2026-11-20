@@ -1026,3 +1026,156 @@ fn elevation_preserves_non_utf8_paths() {
   );
   assert_eq!(fs::read_link(&dst).unwrap(), src);
 }
+
+// --- Task 20: status note, unlink precision, dry run, docs (ADR 0001) ------
+//
+// All fixtures reuse `elev_rig`: config, source, target, "root" destination and
+// elevation stub live in one tempdir under /tmp/opencode. No real /etc, $HOME
+// or ~/.stowrc is involved.
+
+/// A root-mapped package's status row counts the mapped link and carries a
+/// `root` note (both in the table and in --json).
+#[test]
+fn status_row_shows_root_note_for_root_mapped_package() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+
+  let out = r.cmd().args(["status", "app"]).assert().success();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("linked"), "expected linked, got: {text}");
+  assert!(
+    text.contains("root"),
+    "row must carry the root note: {text}"
+  );
+
+  let out = r.cmd().args(["status", "--json", "app"]).assert().success();
+  let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+  let notes = json["packages"][0]["notes"].as_array().unwrap();
+  assert!(
+    notes.iter().any(|n| n.as_str() == Some("root")),
+    "json notes must include the root note, got: {notes:?}"
+  );
+}
+
+/// Unlink removes exactly the mapped root link via elevation and leaves the
+/// user-home links of the same package (including a stale one at the mapped
+/// relative path) alone in the elevated step. Ordinary home links are still
+/// removed by the unprivileged unlink plan.
+#[cfg(unix)]
+#[test]
+fn unlink_removes_exactly_mapped_link_and_leaves_home_links_to_normal_plan() {
+  use std::os::unix::fs::symlink;
+
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+
+  // A home link at the mapped path is not the mapped link: root mappings live
+  // at their absolute destinations, so unlink must not sweep this one up.
+  let stale_home = r.home.join("target/app.ini");
+  symlink(r.source.join("app/app.ini"), &stale_home).unwrap();
+
+  let sibling = r.dest_parent.join("sibling.ini");
+  fs::write(&sibling, "another system file").unwrap();
+
+  r.cmd()
+    .args(["unlink", "--as-root", "app"])
+    .assert()
+    .success();
+
+  assert!(!r.dest().is_symlink(), "root link must be removed");
+  assert!(
+    stale_home.is_symlink(),
+    "user-home link at the mapped path is not a mapped link — leave it alone"
+  );
+  assert!(
+    !r.ordinary().exists(),
+    "ordinary home links are removed by the normal unlink plan"
+  );
+  assert!(
+    sibling.exists(),
+    "unrelated file at the root destination is untouched"
+  );
+
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(
+    log.contains(&format!("rm -f -- {}", r.dest().display())),
+    "only the mapped link goes through elevation: {log}"
+  );
+  assert!(
+    !log.contains(&format!("rm -f -- {}", stale_home.display())),
+    "elevation must not touch user-home links: {log}"
+  );
+}
+
+/// Dry run lists the root actions it would take, without elevating or applying.
+#[test]
+fn dry_run_output_lists_root_actions() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  let out = r
+    .cmd()
+    .args(["link", "--dry-run", "--as-root", "app"])
+    .assert()
+    .success();
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(
+    stdout.contains("root link") && stdout.contains(&r.dest().display().to_string()),
+    "dry run must name the root action and its destination, got: {stdout}"
+  );
+  assert!(!r.dest().exists(), "dry run must not create the root link");
+  assert!(!r.log.exists(), "dry run must not invoke elevation");
+}
+
+/// Clean treats live root links like any other owned link: it leaves them
+/// alone and still removes broken links in the target tree.
+#[cfg(unix)]
+#[test]
+fn clean_leaves_live_root_links_alone() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+  fs::remove_file(r.source.join("app/.zshrc")).unwrap();
+
+  r.cmd().args(["clean"]).assert().success();
+
+  assert!(
+    r.dest().is_symlink(),
+    "a live root link is not broken — keep it"
+  );
+  assert!(
+    !r.ordinary().is_symlink(),
+    "broken ordinary link is cleaned like any other owned link"
+  );
+}
+
+/// The docs must show the exact mapping schema and the elevation contract.
+#[test]
+fn docs_document_mapping_schema_and_elevation() {
+  let spec = include_str!("../docs/spec.md");
+  let readme = include_str!("../README.md");
+  for (name, text) in [("docs/spec.md", spec), ("README.md", readme)] {
+    for needle in [
+      "[package.snapper.root]",
+      "elevate_cmd",
+      "--as-root",
+      "proceed with elevated steps? [y/n]",
+    ] {
+      assert!(text.contains(needle), "{name} must document {needle:?}");
+    }
+  }
+  assert!(
+    spec.contains("does not decide") || spec.contains("cosmetic"),
+    "spec must explain that slashes do not decide the mapping kind"
+  );
+}

@@ -1418,6 +1418,29 @@ pub fn plan_unlink(
   ignore: &Ignore,
   dangling_only: bool,
 ) -> Result<UnlinkPlan> {
+  plan_unlink_with_roots(
+    source,
+    target,
+    pkgs,
+    ignore,
+    dangling_only,
+    &RootMappings::new(),
+  )
+}
+
+/// Like [`plan_unlink`], but excludes `[package.<name>.root]` paths (ADR 0001)
+/// from the ordinary target walk. A root-mapped path is managed at its absolute
+/// destination and removed there via elevation by the CLI; a leftover link in
+/// the user's home at the same relative path is not that mapped link and is
+/// left alone.
+pub fn plan_unlink_with_roots(
+  source: &Path,
+  target: &Path,
+  pkgs: &[String],
+  ignore: &Ignore,
+  dangling_only: bool,
+  roots: &RootMappings,
+) -> Result<UnlinkPlan> {
   let mut plan = UnlinkPlan::default();
   for pkg in pkgs {
     validate_pkg(source, pkg)?;
@@ -1425,6 +1448,15 @@ pub fn plan_unlink(
     if !pkg_root.is_dir() {
       return Err(Error::PackageNotFound(pkg.clone()));
     }
+    let mapped: HashSet<PathBuf> = roots
+      .get(pkg)
+      .map(|mappings| {
+        mappings
+          .keys()
+          .map(|key| lexical_normalize(Path::new(key)))
+          .collect()
+      })
+      .unwrap_or_default();
     // walk the package tree; real target dirs get recursed into
     walk_unlink(
       source,
@@ -1435,6 +1467,7 @@ pub fn plan_unlink(
       ignore,
       &mut plan,
       dangling_only,
+      &mapped,
     )?;
   }
   Ok(plan)
@@ -1450,6 +1483,7 @@ fn walk_unlink(
   ignore: &Ignore,
   plan: &mut UnlinkPlan,
   dangling_only: bool,
+  mapped: &HashSet<PathBuf>,
 ) -> Result<()> {
   let children: Vec<PathBuf> = match fs::read_dir(subdir_abs) {
     Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
@@ -1464,7 +1498,11 @@ fn walk_unlink(
       None => continue,
     };
     let pkg_rel = subdir_rel.join(name);
-    if ignore.is_ignored(&pkg_rel) {
+    if ignore.is_ignored(&pkg_rel)
+      || mapped
+        .iter()
+        .any(|rel| pkg_rel == *rel || pkg_rel.starts_with(rel))
+    {
       continue;
     }
     let dst = target.join(&pkg_rel);
@@ -1494,6 +1532,7 @@ fn walk_unlink(
           ignore,
           plan,
           dangling_only,
+          mapped,
         )?;
       }
       (false, Some(m)) if m.file_type().is_symlink() => {

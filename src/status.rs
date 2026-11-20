@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::ignore::Ignore;
-use crate::link::{EntryKind, lexical_normalize, scan_package};
+use crate::link::{self, EntryKind, RootMappings, lexical_normalize, scan_package};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -86,11 +86,24 @@ pub fn compute_package(
   target: &Path,
   pkg: &str,
   ignore: &Ignore,
+  roots: &RootMappings,
 ) -> Result<PackageStatus> {
-  let entries = scan_package(source, pkg, ignore)?;
   let pkg_root = source.join(pkg);
+  let root_map = roots.get(pkg);
+  let mut entries = scan_package(source, pkg, ignore)?;
+  // Root-mapped paths are managed at their absolute destinations, not in the
+  // target tree. Withhold them from the ordinary walk exactly as the linker's
+  // planner does, so a mapped file is not reported as "not linked" in $HOME.
+  if let Some(mappings) = root_map {
+    entries.retain(|e| {
+      !mappings.keys().any(|key| {
+        let rel = lexical_normalize(Path::new(key));
+        e.pkg_rel == rel || e.pkg_rel.starts_with(&rel)
+      })
+    });
+  }
 
-  if entries.is_empty() {
+  if entries.is_empty() && root_map.is_none_or(|m| m.is_empty()) {
     return Ok(PackageStatus {
       name: pkg.to_string(),
       status: StatusKind::Unlinked,
@@ -228,7 +241,76 @@ pub fn compute_package(
     }
   }
 
-  let total = entries.len();
+  // Root-mapped links live outside the target tree (ADR 0001). Count them in
+  // the package's row and explain any problem at the absolute destination.
+  let mut root_total = 0usize;
+  let mut root_linked = 0usize;
+  let mut root_missing = 0usize;
+  let mut root_conflicts = 0usize;
+  if let Some(mappings) = root_map {
+    for (key, value) in mappings {
+      root_total += 1;
+      let (abs_src, dst) = match link::root_destination(pkg, &pkg_root, key, value) {
+        Ok((abs_src, dst, _is_dir)) => (abs_src, dst),
+        Err(err) => {
+          root_conflicts += 1;
+          issues.push(EntryIssue {
+            target: value.clone(),
+            reason: err.to_string(),
+          });
+          continue;
+        }
+      };
+      match fs::symlink_metadata(&dst) {
+        Ok(meta) if meta.file_type().is_symlink() => match resolve_link(&dst) {
+          Some(rl) if rl == lexical_normalize(&abs_src) => {
+            if fs::metadata(&dst).is_ok() {
+              root_linked += 1;
+            } else {
+              root_missing += 1;
+              issues.push(EntryIssue {
+                target: dst.display().to_string(),
+                reason: "dangling root link".to_string(),
+              });
+            }
+          }
+          Some(rl) => {
+            root_conflicts += 1;
+            issues.push(EntryIssue {
+              target: dst.display().to_string(),
+              reason: format!("root link points at {}", rl.display()),
+            });
+          }
+          None => {
+            root_conflicts += 1;
+            issues.push(EntryIssue {
+              target: dst.display().to_string(),
+              reason: "unreadable root link".to_string(),
+            });
+          }
+        },
+        Ok(_) => {
+          root_conflicts += 1;
+          issues.push(EntryIssue {
+            target: dst.display().to_string(),
+            reason: "root destination exists".to_string(),
+          });
+        }
+        Err(_) => {
+          root_missing += 1;
+          issues.push(EntryIssue {
+            target: dst.display().to_string(),
+            reason: "not linked".to_string(),
+          });
+        }
+      }
+    }
+  }
+  linked += root_linked;
+  missing += root_missing;
+  conflicts += root_conflicts;
+
+  let total = entries.len() + root_total;
   let status = if conflicts > 0 {
     StatusKind::Conflict
   } else if linked == 0 {
@@ -240,6 +322,9 @@ pub fn compute_package(
   };
 
   let mut notes = Vec::new();
+  if root_map.is_some_and(|m| !m.is_empty()) {
+    notes.push("root".to_string());
+  }
   if missing > 0 {
     notes.push(format!("{missing} not linked"));
   }
@@ -264,10 +349,11 @@ pub fn compute_many(
   target: &Path,
   pkgs: &[String],
   ignore: &Ignore,
+  roots: &RootMappings,
 ) -> Result<Vec<PackageStatus>> {
   pkgs
     .iter()
-    .map(|p| compute_package(source, target, p, ignore))
+    .map(|p| compute_package(source, target, p, ignore, roots))
     .collect()
 }
 
