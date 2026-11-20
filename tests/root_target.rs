@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use rustow::config::{Config, normalize_root_mapping};
+use rustow::elevate::{Elevation, authorize_with};
 use rustow::error::Error;
 use rustow::ignore::Ignore;
 use rustow::link::{
@@ -659,6 +660,12 @@ impl ElevRig {
   fn ordinary(&self) -> PathBuf {
     self.home.join("target/.zshrc")
   }
+
+  fn set_conflict_policy(&self, policy: &str) {
+    let path = self.xdg.join("rustow/config.toml");
+    let body = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("on_conflict = {policy:?}\n{body}")).unwrap();
+  }
 }
 
 fn stderr_of(out: &assert_cmd::assert::Assert) -> String {
@@ -796,25 +803,56 @@ fn unwritable_destination_parent_aborts_before_mutation() {
   fs::set_permissions(&r.dest_parent, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// (f) Answering 'n' at the y/n prompt aborts the whole run.
+/// (f) Answering 'n' at the real y/n prompt aborts the whole run. Driven on a
+/// pseudo-terminal (Linux `script`), since ADR 0001 now refuses to prompt on a
+/// non-TTY at all.
+#[cfg(target_os = "linux")]
 #[test]
 fn declining_elevation_prompt_aborts_everything() {
+  use std::io::Write;
+  use std::process::{Command as StdCommand, Stdio};
   let r = elev_rig(true);
   r.make_pkg();
-  let out = r
-    .cmd()
-    .args(["link", "app"])
-    .write_stdin("n\n")
-    .assert()
-    .failure();
-  let stderr = stderr_of(&out);
-  assert!(
-    stderr.contains("proceed with elevated steps? [y/n]"),
-    "prompt must be shown, got: {stderr}"
+  let bin = assert_cmd::cargo::cargo_bin("rustow");
+  let mut child = StdCommand::new("script")
+    .args(["-qec", &format!("{} link app", bin.display()), "/dev/null"])
+    .env("XDG_CONFIG_HOME", &r.xdg)
+    .env("XDG_CACHE_HOME", &r.xdg)
+    .env("HOME", &r.home)
+    .env("DOTFILES_DIR", &r.source)
+    .env("DOTFILES_TARGET", r.home.join("target"))
+    .env("NO_COLOR", "1")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+  let out = child.wait_with_output().unwrap();
+  assert_eq!(out.status.code(), Some(1), "output: {out:?}");
+  let text = format!(
+    "{}{}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
   );
-  assert!(stderr.contains("aborted"), "got: {stderr}");
+  assert!(
+    text.contains("proceed with elevated steps? [y/n]"),
+    "prompt must be shown, got: {text}"
+  );
+  assert!(text.contains("aborted by user"), "got: {text}");
   assert!(!r.dest().exists());
   assert!(!r.ordinary().exists(), "zero filesystem changes");
+}
+
+/// Non-Linux: the PTY harness is unavailable, so assert the same decline at
+/// the authorization seam.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn declining_elevation_prompt_aborts_everything() {
+  let mut input = std::io::Cursor::new(b"n\n".to_vec());
+  let err =
+    authorize_with(&["link /etc/app.ini".to_string()], false, true, &mut input).unwrap_err();
+  assert!(matches!(err, Error::Aborted));
 }
 
 /// Review note #3: a root conflict resolved by Overwrite must stay on the
@@ -888,4 +926,103 @@ fn roots_inner(mappings: &[(&str, &str)]) -> BTreeMap<String, String> {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect()
+}
+
+// --- Review fixes ----------------------------------------------------------
+
+/// F1: a root conflict resolved by Adopt must be removed via elevation BEFORE
+/// apply, and must warn that the system file was replaced, not adopted.
+#[test]
+fn root_adopt_replaces_with_explicit_warning() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.set_conflict_policy("adopt");
+  fs::write(r.dest(), "system file in the way").unwrap();
+  let out = r
+    .cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+
+  assert!(r.dest().is_symlink(), "elevated link must be created");
+  assert_eq!(
+    fs::read_link(r.dest()).unwrap(),
+    r.source.join("app/app.ini")
+  );
+  assert!(r.ordinary().is_symlink(), "ordinary link still applied");
+  let stderr = stderr_of(&out);
+  assert!(
+    stderr.contains("REPLACED") && stderr.contains("not adopted"),
+    "a root adopt must warn that the file was replaced, got: {stderr}"
+  );
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(
+    log.contains("rm -f"),
+    "existing system file must be removed via elevation: {log}"
+  );
+}
+
+/// A reader that panics if anything tries to read it — proves the non-TTY and
+/// --as-root paths never block on an idle stdin pipe.
+struct PanicOnRead;
+
+impl std::io::Read for PanicOnRead {
+  fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+    panic!("must not read stdin on non-TTY")
+  }
+}
+
+impl std::io::BufRead for PanicOnRead {
+  fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+    panic!("must not read stdin on non-TTY")
+  }
+  fn consume(&mut self, _amt: usize) {}
+}
+
+/// F2: a non-TTY fails loudly with the --as-root hint without reading stdin.
+#[test]
+fn non_tty_authorization_never_reads_idle_stdin() {
+  let descriptions = vec!["link /etc/app.ini".to_string()];
+  let err = authorize_with(&descriptions, false, false, &mut PanicOnRead).unwrap_err();
+  assert!(matches!(err, Error::Config(_)), "got: {err}");
+  assert!(
+    err.to_string().contains("--as-root"),
+    "error must name --as-root, got: {err}"
+  );
+}
+
+/// F2: `--as-root` short-circuits without reading stdin; at an interactive
+/// prompt EOF gives the same hint and 'n' aborts.
+#[test]
+fn authorization_seam_short_circuit_eof_and_decline() {
+  let descriptions = vec!["link /etc/app.ini".to_string()];
+  authorize_with(&descriptions, true, true, &mut PanicOnRead).unwrap();
+
+  let mut eof = std::io::Cursor::new(Vec::new());
+  let err = authorize_with(&descriptions, false, true, &mut eof).unwrap_err();
+  assert!(matches!(err, Error::Config(_)), "got: {err}");
+  assert!(err.to_string().contains("--as-root"), "got: {err}");
+
+  let mut decline = std::io::Cursor::new(b"n\n".to_vec());
+  let err = authorize_with(&descriptions, false, true, &mut decline).unwrap_err();
+  assert!(matches!(err, Error::Aborted), "got: {err}");
+}
+
+/// F4: elevation passes paths as raw OsStr, so a non-UTF-8 destination works.
+#[cfg(unix)]
+#[test]
+fn elevation_preserves_non_utf8_paths() {
+  use std::ffi::OsStr;
+  use std::os::unix::ffi::OsStrExt;
+  let r = elev_rig(true);
+  let stub = r._tmp.path().join("bin/elevate-shim");
+  let elevation = Elevation::probe(Some(stub.to_str().unwrap())).unwrap();
+  let src = r.source.join("app/app.ini");
+  let dst = r.dest_parent.join(OsStr::from_bytes(b"app-\xff.ini"));
+  elevation.apply_link(&src, &dst).unwrap();
+  assert!(
+    fs::symlink_metadata(&dst).unwrap().file_type().is_symlink(),
+    "non-UTF-8 destination must be linked"
+  );
+  assert_eq!(fs::read_link(&dst).unwrap(), src);
 }

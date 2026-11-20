@@ -11,6 +11,7 @@
 //! (or `--as-root`) is also handled here.
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -124,22 +125,34 @@ impl Elevation {
         dst.display()
       ))
     })?;
-    self.run(&["mkdir", "-p", "--", &parent.to_string_lossy()])?;
     self.run(&[
-      "ln",
-      "-s",
-      "--",
-      &src.to_string_lossy(),
-      &dst.to_string_lossy(),
+      OsStr::new("mkdir"),
+      OsStr::new("-p"),
+      OsStr::new("--"),
+      parent.as_os_str(),
+    ])?;
+    self.run(&[
+      OsStr::new("ln"),
+      OsStr::new("-s"),
+      OsStr::new("--"),
+      src.as_os_str(),
+      dst.as_os_str(),
     ])
   }
 
   /// Remove exactly one root-mapped link (unlink).
   pub fn remove(&self, dst: &Path) -> Result<()> {
-    self.run(&["rm", "-f", "--", &dst.to_string_lossy()])
+    self.run(&[
+      OsStr::new("rm"),
+      OsStr::new("-f"),
+      OsStr::new("--"),
+      dst.as_os_str(),
+    ])
   }
 
-  fn run(&self, args: &[&str]) -> Result<()> {
+  /// Arguments are passed as raw `OsStr`s so non-UTF-8 paths survive intact;
+  /// lossy conversion is used only when rendering an error message.
+  fn run(&self, args: &[&OsStr]) -> Result<()> {
     let status = Command::new(&self.program)
       .args(args)
       .status()
@@ -151,11 +164,16 @@ impl Elevation {
         ))
       })?;
     if !status.success() {
+      let shown = args
+        .iter()
+        .map(|a| a.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
       return Err(Error::Message(format!(
         "elevation program {} ({}) failed: {} {}",
         self.program.display(),
         self.origin,
-        args.join(" "),
+        shown,
         status
       )));
     }
@@ -205,28 +223,43 @@ fn writable_dir(_path: &Path) -> bool {
   true
 }
 
-/// Effective UID is root. Best-effort: Linux exposes it via `/proc`; on other
-/// platforms this returns false (the warning is informational, never Load-bearing).
+/// Effective UID is root. Uses `geteuid()` on every supported Unix (Linux and
+/// macOS alike); the non-Unix fallback keeps the warning informational only.
 pub fn euid_is_zero() -> bool {
-  #[cfg(target_os = "linux")]
+  #[cfg(unix)]
   {
-    if let Ok(status) = fs::read_to_string("/proc/self/status") {
-      for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-          let fields: Vec<_> = rest.split_whitespace().collect();
-          return fields.get(1) == Some(&"0"); // index 1 = effective UID
-        }
-      }
-    }
+    // SAFETY: `geteuid` takes no arguments and has no preconditions.
+    unsafe { libc::geteuid() == 0 }
   }
-  false
+  #[cfg(not(unix))]
+  {
+    false
+  }
 }
 
-/// Authorize elevated actions. `--as-root` authorizes non-interactively;
-/// otherwise print the action list and read one y/n line from stdin. EOF (a
-/// closed or non-TTY stdin) fails loudly with the `--as-root` hint. `n` (or
-/// anything other than y/yes) aborts the whole run.
+fn non_interactive_error() -> Error {
+  Error::Config(
+    "no interactive input available at the elevation prompt — re-run with --as-root to authorize elevated steps non-interactively".to_string(),
+  )
+}
+
+/// Authorize elevated actions using the real process stdin.
 pub fn authorize(descriptions: &[String], as_root: bool) -> Result<()> {
+  use std::io::IsTerminal;
+  let tty = std::io::stdin().is_terminal();
+  authorize_with(descriptions, as_root, tty, &mut std::io::stdin().lock())
+}
+
+/// Testable authorization seam. `tty` decides whether the y/n prompt is
+/// offered; `input` supplies the answer. A non-TTY never reads from `input` at
+/// all (an open, idle pipe must not block), and fails with the same
+/// `--as-root` hint as an EOF at the prompt.
+pub fn authorize_with<R: std::io::BufRead>(
+  descriptions: &[String],
+  as_root: bool,
+  tty: bool,
+  input: &mut R,
+) -> Result<()> {
   if euid_is_zero() {
     eprintln!(
       "rustow: WARNING: running as root — root's config and HOME apply; root-mapped actions follow the same authorization rules"
@@ -242,16 +275,17 @@ pub fn authorize(descriptions: &[String], as_root: bool) -> Result<()> {
   for line in descriptions {
     eprintln!("  {line}");
   }
+  if !tty {
+    return Err(non_interactive_error());
+  }
   eprint!("proceed with elevated steps? [y/n] ");
   use std::io::Write;
   let _ = std::io::stderr().flush();
 
   let mut answer = String::new();
-  let read = std::io::stdin().read_line(&mut answer).unwrap_or(0);
+  let read = input.read_line(&mut answer).unwrap_or(0);
   if read == 0 {
-    return Err(Error::Config(
-      "no input available at the elevation prompt — re-run with --as-root to authorize elevated steps non-interactively".to_string(),
-    ));
+    return Err(non_interactive_error());
   }
   match answer.trim().to_ascii_lowercase().as_str() {
     "y" | "yes" => Ok(()),

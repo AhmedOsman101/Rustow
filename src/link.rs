@@ -1083,6 +1083,8 @@ pub fn apply_plans_with_elevation(
   let mut fixup_dsts: HashSet<PathBuf> = HashSet::new();
   // Root destinations whose existing target must be removed via elevation.
   let mut root_overwrites: HashSet<PathBuf> = HashSet::new();
+  // Root destinations that were "adopted" — really replaced, see warning below.
+  let mut root_adopts: Vec<PathBuf> = Vec::new();
   for (c, outcome) in outcomes {
     let is_root = all_root_dsts.contains(&c.dst);
     let src = c.src.clone();
@@ -1107,9 +1109,12 @@ pub fn apply_plans_with_elevation(
       PromptOutcome::Adopt => {
         fixup_dsts.insert(c.dst.clone());
         if is_root {
-          // Adopting a root-owned file into the package cannot be done by the
-          // invoking user; remove it via elevation and link instead.
+          // An unprivileged process cannot preserve a root-owned file's
+          // content/ownership while moving it into the package. Replace it
+          // via elevation instead, and say so loudly.
+          overwritten.push(c.dst.clone());
           root_overwrites.insert(c.dst.clone());
+          root_adopts.push(c.dst.clone());
         }
         if let Some(src) = src {
           if is_root {
@@ -1146,6 +1151,12 @@ pub fn apply_plans_with_elevation(
   if suppressed > 0 {
     out_warnings.push(format!(
       "suppressed {suppressed} duplicate link action(s) at targets claimed by another package"
+    ));
+  }
+  for dst in &root_adopts {
+    out_warnings.push(format!(
+      "root-mapped destination {} was REPLACED, not adopted: a root-owned file's content and ownership cannot be preserved by an unprivileged process",
+      dst.display()
     ));
   }
   let mut out = ApplyOutcome {
