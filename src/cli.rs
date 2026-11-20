@@ -333,6 +333,46 @@ impl<'a> App<'a> {
     );
     Ok(0)
   }
+
+  /// Plan the link phase against the current tree and refuse to proceed when
+  /// a conflict cannot be resolved. `relink` unlinks before it links, so a
+  /// conflict found only afterwards would leave the target empty.
+  fn check_link_conflicts(&self, pkgs: &[String]) -> Result<()> {
+    let ignore = self.ignore()?;
+    let plans = link::plan_link_all(&LinkInput {
+      source: self.source(),
+      target: self.target(),
+      pkgs,
+      fold: self.resolved.cfg.fold,
+      fold_ignore: &self.resolved.cfg.fold_ignore,
+      ignore: &ignore,
+    })?;
+
+    let mut resolver = self.make_resolver();
+    let mut outcomes = Vec::new();
+    for plan in &plans {
+      for conflict in &plan.conflicts {
+        outcomes.push((conflict, resolver.resolve(conflict)?));
+      }
+    }
+    if outcomes
+      .iter()
+      .all(|(_, outcome)| *outcome != PromptOutcome::Abort)
+    {
+      return Ok(());
+    }
+
+    // Mirror `link::render_conflict_report` so this abort reads the same as a
+    // conflict found during an ordinary link.
+    let mut report = String::from("rustow: conflicts detected — nothing was changed:\n");
+    for (conflict, _) in outcomes {
+      report.push_str(&format!("  {conflict}\n"));
+      if let Some(detail) = &conflict.detail {
+        report.push_str(&format!("      existing target: {}\n", detail.display()));
+      }
+    }
+    Err(Error::Conflicts(report))
+  }
 }
 
 fn render_action(action: &link::Action) -> String {
@@ -483,6 +523,12 @@ pub fn run(cli: Cli) -> Result<i32> {
     }
     Commands::Relink { pkgs } => {
       let app = App::new(&cli.global)?;
+      // Plan the link phase first: an unresolved conflict must abort before
+      // the unlink, leaving the current links intact. A dry run never touches
+      // the tree, so it keeps its report-only behaviour.
+      if !cli.global.dry_run {
+        app.check_link_conflicts(&pkgs)?;
+      }
       // unlink first (never conflicts), then link
       let _ = app.unlink_pkgs(&pkgs)?;
       app.link_pkgs(&pkgs)
