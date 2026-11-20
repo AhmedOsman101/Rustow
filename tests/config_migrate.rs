@@ -382,3 +382,146 @@ fn malformed_stowrc_missing_value_errors_and_writes_nothing() {
 
   assert_eq!(fs::read_to_string(&r.cfg_path).unwrap(), "verbose = true\n");
 }
+
+// --- Task 22: the same adoption offer inline in `config init` (ADR 0004) ----
+
+#[test]
+fn init_with_stowrc_shows_adoption_prompt() {
+  let r = rig();
+  r.write_stowrc(&r.stowrc_contents());
+
+  r.cmd()
+    .args(["config", "init"])
+    .write_stdin("k\n")
+    .assert()
+    .success()
+    .stdout(contains("stowrc -> config.toml"))
+    .stdout(contains("[a]dopt"))
+    .stdout(contains("[k]eep defaults"));
+
+  assert!(r.cfg_path.exists());
+}
+
+#[test]
+fn init_adopt_merges_stowrc_values_into_default() {
+  let r = rig();
+  let contents = r.stowrc_contents();
+  r.write_stowrc(&contents);
+
+  r.cmd()
+    .args(["config", "init"])
+    .write_stdin("a\n")
+    .assert()
+    .success();
+
+  // Adoption keeps the annotated default and adds the stowrc values on top.
+  let text = fs::read_to_string(&r.cfg_path).unwrap();
+  assert!(
+    text.contains("# rustow — default configuration"),
+    "adopted config should still be the annotated default: {text}"
+  );
+  assert_eq!(
+    r.config_value("source")
+      .and_then(|v| v.as_str().map(str::to_owned)),
+    Some(r.source.to_string_lossy().into_owned())
+  );
+  assert_eq!(
+    r.config_value("target")
+      .and_then(|v| v.as_str().map(str::to_owned)),
+    Some(r.target.to_string_lossy().into_owned())
+  );
+  assert_eq!(
+    r.config_value("verbose").and_then(|v| v.as_bool()),
+    Some(false)
+  );
+  // The stowrc is an input to the migration, never something it removes.
+  assert_eq!(fs::read_to_string(&r.stowrc).unwrap(), contents);
+  assert!(!r.home.join(".stowrc.bak").exists());
+}
+
+#[test]
+fn init_keep_writes_documented_default() {
+  let r = rig();
+  r.write_stowrc(&r.stowrc_contents());
+
+  r.cmd()
+    .args(["config", "init"])
+    .write_stdin("k\n")
+    .assert()
+    .success()
+    .stdout(contains("skipped"));
+
+  assert_eq!(
+    fs::read_to_string(&r.cfg_path).unwrap(),
+    rustow::config::print_default()
+  );
+}
+
+#[test]
+fn init_yes_adopts_non_interactively() {
+  let r = rig();
+  r.write_stowrc(&r.stowrc_contents());
+
+  // EOF on stdin: if the prompt ran, it would keep defaults and adopt nothing.
+  // Adoption still happening proves --yes skipped the prompt.
+  r.cmd()
+    .args(["config", "init", "--yes"])
+    .write_stdin("")
+    .assert()
+    .success()
+    .stdout(contains("stowrc -> config.toml"));
+
+  assert_eq!(
+    r.config_value("source")
+      .and_then(|v| v.as_str().map(str::to_owned)),
+    Some(r.source.to_string_lossy().into_owned())
+  );
+  assert_eq!(
+    r.config_value("target")
+      .and_then(|v| v.as_str().map(str::to_owned)),
+    Some(r.target.to_string_lossy().into_owned())
+  );
+}
+
+#[test]
+fn init_without_stowrc_writes_default_without_prompt() {
+  let r = rig();
+  assert!(!r.stowrc.exists());
+
+  let out = r
+    .cmd()
+    .args(["config", "init"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let stdout = String::from_utf8(out).unwrap();
+  assert!(!stdout.contains("[a]dopt"), "unexpected prompt: {stdout}");
+
+  assert_eq!(
+    fs::read_to_string(&r.cfg_path).unwrap(),
+    rustow::config::print_default()
+  );
+}
+
+#[test]
+fn init_force_semantics_unchanged_when_stowrc_is_absent() {
+  let r = rig();
+  r.write_config("verbose = true\n");
+
+  r.cmd()
+    .args(["config", "init"])
+    .assert()
+    .failure()
+    .stderr(contains("already exists"));
+  r.cmd()
+    .args(["config", "init", "--force"])
+    .assert()
+    .success();
+
+  assert_eq!(
+    fs::read_to_string(&r.cfg_path).unwrap(),
+    rustow::config::print_default()
+  );
+}

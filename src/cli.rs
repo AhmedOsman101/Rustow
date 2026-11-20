@@ -184,6 +184,9 @@ pub enum ConfigCommands {
     /// Overwrite an existing config file.
     #[arg(long)]
     force: bool,
+    /// Adopt values from ~/.stowrc without prompting.
+    #[arg(long)]
+    yes: bool,
     /// Write to a custom path instead of the default location.
     #[arg(long, value_name = "PATH")]
     path: Option<PathBuf>,
@@ -632,12 +635,13 @@ impl ConflictResolver for PromptResolver {
   }
 }
 
-/// Ask `[a]dopt / [s]kip` on stdin. A simple line reader (not dialoguer) keeps
-/// the prompt drivable through the real binary with piped stdin; EOF = skip.
-fn prompt_adopt() -> Result<bool> {
+/// Read a one-letter answer on stdin. A simple line reader (not dialoguer)
+/// keeps the prompt drivable through the real binary with piped stdin; EOF
+/// takes the conservative choice (skip / keep defaults).
+fn prompt_choice(prompt: &str) -> Result<bool> {
   use std::io::{BufRead, Write};
 
-  print!("adopt these values into config.toml? [a]dopt / [s]kip: ");
+  print!("{prompt}");
   std::io::stdout()
     .flush()
     .map_err(|e| Error::Message(format!("failed to flush prompt: {e}")))?;
@@ -655,6 +659,16 @@ fn prompt_adopt() -> Result<bool> {
   ))
 }
 
+/// Ask `[a]dopt / [s]kip` (`config migrate`).
+fn prompt_adopt() -> Result<bool> {
+  prompt_choice("adopt these values into config.toml? [a]dopt / [s]kip: ")
+}
+
+/// Ask `[a]dopt / [k]eep defaults` (`config init`), reusing the same reader.
+fn prompt_init_adopt() -> Result<bool> {
+  prompt_choice("adopt these values into config.toml? [a]dopt / [k]eep defaults: ")
+}
+
 pub fn run(cli: Cli) -> Result<i32> {
   match cli.command {
     Commands::Config(cmd) => match cmd {
@@ -662,8 +676,30 @@ pub fn run(cli: Cli) -> Result<i32> {
         print!("{}", config::print_default());
         Ok(0)
       }
-      ConfigCommands::Init { force, path } => {
+      ConfigCommands::Init { force, yes, path } => {
         let path = path.unwrap_or_else(config::config_path);
+        let stowrc_path = config::stowrc_path();
+        if stowrc_path.exists() {
+          // Same shared seam as `config migrate`; init passes its destination
+          // path so the plan adopts only the values that path leaves unset.
+          let plan = config::migrate_stowrc(&path, &stowrc_path)?;
+          for w in &plan.warnings {
+            eprintln!("rustow: warning: {w}");
+          }
+          if !plan.is_empty() {
+            print!("{}", plan.render_diff());
+            if yes || prompt_init_adopt()? {
+              let written = config::write_default_with_adopted(&path, force, &plan)?;
+              println!("wrote {}", written.display());
+              println!(
+                "note: stowrc left untouched — you can remove it now ({} is inert once config.toml exists)",
+                stowrc_path.display()
+              );
+              return Ok(0);
+            }
+            println!("skipped — keeping defaults");
+          }
+        }
         let written = config::write_default(&path, force)?;
         println!("wrote {}", written.display());
         Ok(0)

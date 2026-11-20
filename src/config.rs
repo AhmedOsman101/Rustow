@@ -381,9 +381,9 @@ pub fn print_default() -> String {
   DEFAULT_CONFIG_TOML.to_string()
 }
 
-/// Write the default configuration to `path` (creating parent dirs).
+/// Write `text` to `path` (creating parent dirs).
 /// Refuses to overwrite an existing file unless `force`.
-pub fn write_default(path: &Path, force: bool) -> Result<PathBuf> {
+fn write_config_text(path: &Path, force: bool, text: &str) -> Result<PathBuf> {
   if path.exists() && !force {
     return Err(Error::Message(format!(
       "{} already exists (use --force to overwrite)",
@@ -393,8 +393,14 @@ pub fn write_default(path: &Path, force: bool) -> Result<PathBuf> {
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent).map_err(Error::io(parent))?;
   }
-  fs::write(path, print_default()).map_err(Error::io(path))?;
+  fs::write(path, text).map_err(Error::io(path))?;
   Ok(path.to_path_buf())
+}
+
+/// Write the default configuration to `path` (creating parent dirs).
+/// Refuses to overwrite an existing file unless `force`.
+pub fn write_default(path: &Path, force: bool) -> Result<PathBuf> {
+  write_config_text(path, force, &print_default())
 }
 
 #[cfg(test)]
@@ -1357,4 +1363,48 @@ mod migrate_tests {
     .unwrap();
     assert_eq!(kept.len(), 1);
   }
+}
+
+// --- Task 22: inline adoption offer in `config init` (ADR 0004) -------------
+
+/// The annotated default config with a plan's adopted stowrc values merged in.
+///
+/// `source` and `target` are commented out in the default template, so they
+/// become active lines in place; `verbose` is active there, so it is replaced
+/// in place. The surrounding documentation is preserved and no key is
+/// duplicated. This is the file written when `config init` adopts a stowrc.
+pub fn default_with_adopted(plan: &MigratePlan) -> String {
+  let mut text = print_default();
+  for addition in &plan.additions {
+    let active = format!("{} = {}", addition.key, addition.toml);
+    let mut replaced = false;
+    let mut out = String::with_capacity(text.len() + active.len());
+    for seg in text.split_inclusive('\n') {
+      let trimmed = seg.trim_start();
+      // Match both the commented-out placeholders and active keys, but never
+      // prose that merely mentions a key name mid-sentence.
+      let body = trimmed.strip_prefix('#').unwrap_or(trimmed).trim_start();
+      let is_key = body
+        .strip_prefix(addition.key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='));
+      if is_key {
+        out.push_str(&active);
+        out.push('\n');
+        replaced = true;
+      } else {
+        out.push_str(seg);
+      }
+    }
+    text = out;
+    if !replaced {
+      text = merge_top_level_keys(&text, &[active]);
+    }
+  }
+  text
+}
+
+/// Write the documented default with a plan's adopted stowrc values. Same
+/// overwrite rules as [`write_default`]; the stowrc itself is never touched.
+pub fn write_default_with_adopted(path: &Path, force: bool, plan: &MigratePlan) -> Result<PathBuf> {
+  write_config_text(path, force, &default_with_adopted(plan))
 }
