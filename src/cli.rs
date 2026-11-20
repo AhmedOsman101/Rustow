@@ -371,8 +371,9 @@ impl<'a> App<'a> {
   }
 
   /// Absolute root destinations that currently hold one of our links, for the
-  /// packages being unlinked. A root mapping whose source has vanished cannot
-  /// be re-derived and is skipped (nothing can be linked to it anyway).
+  /// packages being unlinked. If a mapped source has vanished, the source type
+  /// can no longer be derived, so both the exact value and the directory-style
+  /// `<value>/<basename(key)>` are checked against what is on disk (ADR 0001).
   fn root_unlink_dests(&self, pkgs: &[String]) -> Result<Vec<PathBuf>> {
     let roots = root_mappings(&self.resolved.cfg);
     let mut out = Vec::new();
@@ -382,19 +383,18 @@ impl<'a> App<'a> {
         continue;
       };
       for (key, value) in mappings {
-        let Ok((_src, dst, _is_dir)) = link::root_destination(pkg, &pkg_root, key, value) else {
-          continue;
-        };
-        let Ok(raw) = fs::read_link(&dst) else {
-          continue;
-        };
-        let abs = if raw.is_absolute() {
-          raw
-        } else {
-          dst.parent().unwrap_or_else(|| Path::new(".")).join(raw)
-        };
-        if link::lexical_normalize(&abs).starts_with(&pkg_root) {
-          out.push(dst);
+        for dst in link::root_dest_candidates(pkg, &pkg_root, key, value) {
+          let Ok(raw) = fs::read_link(&dst) else {
+            continue;
+          };
+          let abs = if raw.is_absolute() {
+            raw
+          } else {
+            dst.parent().unwrap_or_else(|| Path::new(".")).join(raw)
+          };
+          if link::lexical_normalize(&abs).starts_with(&pkg_root) && !out.contains(&dst) {
+            out.push(dst);
+          }
         }
       }
     }
@@ -432,13 +432,19 @@ impl<'a> App<'a> {
       &ignore,
       self.globals.dry_run,
     )?;
-    let mut root_removed = 0usize;
-    if let Some(elev) = &elevation {
-      for dst in &root_links {
-        elev.remove(dst)?;
-        root_removed += 1;
+    // A dry run reports the root links it would remove but never elevates.
+    let root_removed = if self.globals.dry_run {
+      root_links.len()
+    } else {
+      let mut count = 0usize;
+      if let Some(elev) = &elevation {
+        for dst in &root_links {
+          elev.remove(dst)?;
+          count += 1;
+        }
       }
-    }
+      count
+    };
     let verb = if self.globals.dry_run {
       "would unlink"
     } else {
@@ -660,7 +666,34 @@ pub fn run(cli: Cli) -> Result<i32> {
     Commands::Clean => {
       let app = App::new(&cli.global)?;
       let ignore = app.ignore()?;
-      let plan = link::plan_clean(app.source(), app.target(), &ignore)?;
+      let roots = root_mappings(&app.resolved.cfg);
+      let plan = link::plan_clean_with_roots(app.source(), app.target(), &ignore, &roots)?;
+      let root_dsts: Vec<PathBuf> = plan
+        .root_actions
+        .iter()
+        .map(|action| match action {
+          link::UnlinkAction::Unlink { dst } => dst.clone(),
+        })
+        .collect();
+
+      // Same gate as unlink: authorize → probe → preflight runs before ANY
+      // filesystem mutation, including the ordinary unprivileged sweep.
+      let elevation = if cli.global.dry_run || root_dsts.is_empty() {
+        None
+      } else {
+        let descriptions: Vec<String> = root_dsts
+          .iter()
+          .map(|dst| format!("clean {}", dst.display()))
+          .collect();
+        let dsts: HashSet<PathBuf> = root_dsts.iter().cloned().collect();
+        Some(prepare_elevation(
+          descriptions,
+          dsts,
+          app.resolved.cfg.elevate_cmd.as_deref(),
+          cli.global.as_root,
+        )?)
+      };
+
       let n = link::apply_unlink(
         &plan,
         app.target(),
@@ -668,6 +701,18 @@ pub fn run(cli: Cli) -> Result<i32> {
         &ignore,
         cli.global.dry_run,
       )?;
+      let root_removed = if cli.global.dry_run {
+        root_dsts.len()
+      } else {
+        let mut count = 0usize;
+        if let Some(elev) = &elevation {
+          for dst in &root_dsts {
+            elev.remove(dst)?;
+            count += 1;
+          }
+        }
+        count
+      };
       let verb = if cli.global.dry_run {
         "would delete"
       } else {
@@ -678,8 +723,11 @@ pub fn run(cli: Cli) -> Result<i32> {
           let link::UnlinkAction::Unlink { dst } = action;
           println!("{verb} {}", dst.display());
         }
+        for dst in &root_dsts {
+          println!("{verb} {}", dst.display());
+        }
       }
-      println!("{verb} {n} broken link(s)");
+      println!("{verb} {} broken link(s)", n + root_removed);
       Ok(0)
     }
     Commands::Relink { pkgs } => {

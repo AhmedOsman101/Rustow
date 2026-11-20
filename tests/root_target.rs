@@ -1046,7 +1046,6 @@ fn status_row_shows_root_note_for_root_mapped_package() {
 
   let out = r.cmd().args(["status", "app"]).assert().success();
   let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-  assert!(text.contains("linked"), "expected linked, got: {text}");
   assert!(
     text.contains("root"),
     "row must carry the root note: {text}"
@@ -1054,7 +1053,12 @@ fn status_row_shows_root_note_for_root_mapped_package() {
 
   let out = r.cmd().args(["status", "--json", "app"]).assert().success();
   let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
-  let notes = json["packages"][0]["notes"].as_array().unwrap();
+  let pkg = &json["packages"][0];
+  assert_eq!(pkg["status"].as_str(), Some("linked"), "json: {pkg:?}");
+  // .zshrc (ordinary) + app.ini (root-mapped) both count as linked.
+  assert_eq!(pkg["total"].as_u64(), Some(2), "json: {pkg:?}");
+  assert_eq!(pkg["linked"].as_u64(), Some(2), "json: {pkg:?}");
+  let notes = pkg["notes"].as_array().unwrap();
   assert!(
     notes.iter().any(|n| n.as_str() == Some("root")),
     "json notes must include the root note, got: {notes:?}"
@@ -1177,5 +1181,103 @@ fn docs_document_mapping_schema_and_elevation() {
   assert!(
     spec.contains("does not decide") || spec.contains("cosmetic"),
     "spec must explain that slashes do not decide the mapping kind"
+  );
+}
+
+// --- Senior-review fix round (Task 20) -------------------------------------
+
+/// F2: clean removes a broken root-mapped link via the elevation helper, with
+/// the same authorize→probe→preflight gate as unlink. Without --as-root on a
+/// non-TTY nothing changes; with it the dangling link is removed via `rm -f`.
+#[test]
+fn clean_removes_broken_root_link_through_elevation() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+  fs::remove_file(r.source.join("app/app.ini")).unwrap(); // dangle the root link
+
+  let out = r.cmd().args(["clean"]).write_stdin("").assert().failure();
+  let stderr = stderr_of(&out);
+  assert!(
+    stderr.contains("--as-root"),
+    "clean must fail with the --as-root hint, got: {stderr}"
+  );
+  assert!(
+    r.dest().is_symlink(),
+    "the gate must abort before any root link is removed"
+  );
+
+  r.cmd().args(["clean", "--as-root"]).assert().success();
+  assert!(
+    !r.dest().is_symlink(),
+    "broken root link must be removed like any other owned link"
+  );
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(
+    log.contains(&format!("rm -f -- {}", r.dest().display())),
+    "broken root link must go through elevation: {log}"
+  );
+}
+
+/// F1: a mapped source that vanished cannot be re-derived from its filesystem
+/// type, but its configured key still names the destination. Unlink removes
+/// the dangling root link through elevation instead of skipping it.
+#[test]
+fn unlink_removes_root_link_after_source_vanishes() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+  fs::remove_file(r.source.join("app/app.ini")).unwrap();
+
+  r.cmd()
+    .args(["unlink", "--as-root", "app"])
+    .assert()
+    .success();
+  assert!(
+    !r.dest().is_symlink(),
+    "dangling root link must still be removed"
+  );
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(
+    log.contains(&format!("rm -f -- {}", r.dest().display())),
+    "removal must go through elevation: {log}"
+  );
+}
+
+/// F3: dry run counts root links it reports as "would unlink".
+#[test]
+fn unlink_dry_run_counts_root_links() {
+  let r = elev_rig(true);
+  r.make_pkg();
+  r.cmd()
+    .args(["link", "--as-root", "app"])
+    .assert()
+    .success();
+  let log_before = fs::read_to_string(&r.log).unwrap();
+
+  let out = r
+    .cmd()
+    .args(["unlink", "--dry-run", "--as-root", "app"])
+    .assert()
+    .success();
+  let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(
+    stdout.contains("would unlink 2 link(s)"),
+    "summary must count the ordinary and the root link, got: {stdout}"
+  );
+  assert!(
+    r.dest().is_symlink(),
+    "dry run must not remove the root link"
+  );
+  assert_eq!(
+    fs::read_to_string(&r.log).unwrap(),
+    log_before,
+    "dry run must not invoke elevation"
   );
 }

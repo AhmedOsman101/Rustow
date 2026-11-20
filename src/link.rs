@@ -745,6 +745,25 @@ pub fn root_destination(
   Ok((abs_src, dst, is_dir))
 }
 
+/// Candidate absolute destinations for one mapping, including when the mapped
+/// source has vanished. With the source present its filesystem type decides the
+/// single destination (ADR 0001, amended). Once the source is gone that type
+/// cannot be derived, so both spellings are returned to be matched against the
+/// link actually on disk: `value` (file-style) and
+/// `<value>/<basename(normalized key)>` (directory-style — slashes are cosmetic).
+pub fn root_dest_candidates(pkg: &str, pkg_root: &Path, key: &str, value: &str) -> Vec<PathBuf> {
+  if let Ok((_src, dst, _is_dir)) = root_destination(pkg, pkg_root, key, value) {
+    return vec![dst];
+  }
+  let value_path = PathBuf::from(value);
+  let mut out = vec![lexical_normalize(&value_path)];
+  let src_rel = lexical_normalize(Path::new(key));
+  if let Some(base) = src_rel.file_name() {
+    out.push(lexical_normalize(&value_path.join(base)));
+  }
+  out
+}
+
 pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
   plan_link_all_with_roots(input, &RootMappings::new())
 }
@@ -1344,6 +1363,9 @@ pub struct UnlinkPlan {
   pub candidate_dirs: std::collections::HashSet<PathBuf>,
   /// Informational: entries found on disk that were NOT ours (left alone).
   pub foreign_skipped: Vec<PathBuf>,
+  /// Broken root-mapped links outside `target` (ADR 0001). `apply_unlink`
+  /// never touches these; the CLI removes them through the elevation helper.
+  pub root_actions: Vec<UnlinkAction>,
 }
 
 /// Sweep the *target* tree for symlinks pointing into `source` whose
@@ -1353,6 +1375,20 @@ pub struct UnlinkPlan {
 /// ignored. Does not touch anything owned by another package or external to
 /// `source`.
 pub fn plan_clean(source: &Path, target: &Path, ignore: &Ignore) -> Result<UnlinkPlan> {
+  plan_clean_with_roots(source, target, ignore, &RootMappings::new())
+}
+
+/// Like [`plan_clean`], but also sweeps broken root-mapped links (ADR 0001):
+/// symlinks at mapped absolute destinations whose source no longer exists.
+/// Live root links are left alone, and the broken ones go into
+/// `UnlinkPlan::root_actions` so the CLI can elevate their removal — this
+/// function only plans, it never touches the filesystem outside `target`.
+pub fn plan_clean_with_roots(
+  source: &Path,
+  target: &Path,
+  ignore: &Ignore,
+  roots: &RootMappings,
+) -> Result<UnlinkPlan> {
   let mut plan = UnlinkPlan::default();
   let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| lexical_normalize(p));
   let source_canon = canon(source);
@@ -1401,6 +1437,27 @@ pub fn plan_clean(source: &Path, target: &Path, ignore: &Ignore) -> Result<Unlin
           continue;
         }
         stack.push(path);
+      }
+    }
+  }
+
+  // Root-mapped links live outside the target sweep. Treat them like any
+  // other owned link: only dangling ones are planned for removal, and only
+  // via the elevated path (the CLI applies them after authorization).
+  for (pkg, mappings) in roots {
+    let pkg_root = source.join(pkg);
+    for (key, value) in mappings {
+      for dst in root_dest_candidates(pkg, &pkg_root, key, value) {
+        let Some(resolved) = resolve_symlink(&dst) else {
+          continue;
+        };
+        if !resolved.starts_with(&pkg_root) || fs::metadata(&dst).is_ok() {
+          continue; // not ours, or still live — clean only removes broken links
+        }
+        let action = UnlinkAction::Unlink { dst: dst.clone() };
+        if !plan.root_actions.contains(&action) {
+          plan.root_actions.push(action);
+        }
       }
     }
   }
