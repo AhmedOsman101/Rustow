@@ -1,6 +1,6 @@
 # ADR 0001: Root targeting via per-package config mapping
 
-- **Status:** Accepted (2026-11-16)
+- **Status:** Accepted (2026-11-16); amended (2026-11-20 — mapping kind follows source type, slashes cosmetic)
 - **Context:** rustow manages `~/dotfiles` → `$HOME`. Some config files legitimately belong at absolute paths outside `$HOME` (e.g. `/etc/php/php.ini`, `/etc/snapper/configs/root`). Today this is done by hand, or by symlinking into `/etc` manually and re-linking on every machine — brittle and invisible to rustow (no plan, no status, no unlink).
 - **Decision:** Root targeting is **config-only** (no CLI flag). A package opts paths in with a `[package.<name>.root]` table in `config.toml`:
 
@@ -10,8 +10,9 @@
   "configs/root" = "/etc/snapper/root"  # file → file
   ```
 
-  - Keys are package-relative paths. A key ending in `/` is a **directory mapping**: value must be an absolute directory (with trailing `/`), and rustow creates ONE symlink at `<value><basename(source-dir)>` (e.g. `/etc/snapper/configs -> <pkg>/configs`) — fold semantics against an absolute parent.
-  - A key without a trailing slash is a **file mapping**: the value is the exact absolute destination for that file.
+  - Keys are package-relative paths; `..` escapes are rejected (same validation as `create --path`). Values must be absolute (after `~` expansion).
+  - The **source path's actual filesystem type** decides the mapping kind, at plan time: a directory source is a directory mapping — rustow creates ONE symlink at `<value>/<basename(source-dir)>` (e.g. `/etc/snapper/configs -> <pkg>/configs`), fold semantics against an absolute parent; a file source is a file mapping — the value is the exact absolute destination for that file.
+  - A trailing `/` on a key or value is cosmetic and normalized away; it never decides the mapping kind. A mapped source path that does not exist is a config/plan-time error (there is nothing to link, so no type can be derived).
   - Values support `~` expansion; values must be absolute (non-absolute → config error). Keys must not escape the package (`..` rejected; keys are validated the same way as `--path` in `create`).
   - Root-mapped paths never fold, never refold, and are excluded from the package fold decision.
   - Same two-phase conflict machinery: nothing is planned as ok'd until all conflicts resolve.
