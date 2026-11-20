@@ -14,6 +14,7 @@ struct Rig {
   source: PathBuf,
   target: PathBuf,
   xdg: PathBuf,
+  home: PathBuf,
 }
 
 fn rig() -> Rig {
@@ -22,14 +23,18 @@ fn rig() -> Rig {
   // the layout the spec prescribes: source nested below the target root
   let source = target.join("dotfiles/Configs");
   let xdg = tmp.path().join("xdg");
+  // empty per-fixture HOME: never read the real ~/.stowrc
+  let home = tmp.path().join("userhome");
   fs::create_dir_all(&source).unwrap();
   fs::create_dir_all(&target).unwrap();
   fs::create_dir_all(&xdg).unwrap();
+  fs::create_dir_all(&home).unwrap();
   Rig {
     _tmp: tmp,
     source,
     target,
     xdg,
+    home,
   }
 }
 
@@ -39,6 +44,7 @@ impl Rig {
     cmd
       .env("XDG_CONFIG_HOME", &self.xdg)
       .env("XDG_CACHE_HOME", &self.xdg)
+      .env("HOME", &self.home)
       .env("DOTFILES_DIR", &self.source)
       .env("DOTFILES_TARGET", &self.target)
       .env("NO_COLOR", "1");
