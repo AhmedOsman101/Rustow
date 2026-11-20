@@ -402,6 +402,12 @@ fn render_action(action: &link::Action) -> String {
     link::Action::Unfold { dst } => format!("unfold {}", dst.display()),
     link::Action::Repair { src, dst } => format!("repair {} -> {}", dst.display(), src.display()),
     link::Action::SkipIdempotent { .. } => "skip  (already linked)".to_string(),
+    link::Action::RootLink { src, dst } => {
+      format!("root link {} -> {}", dst.display(), src.display())
+    }
+    link::Action::RootFold { src_dir, dst } => {
+      format!("root fold {} -> {}", dst.display(), src_dir.display())
+    }
   }
 }
 

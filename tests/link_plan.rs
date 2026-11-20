@@ -72,6 +72,9 @@ fn exec(plan: &rustow::link::Plan) {
         fs::remove_file(dst).unwrap(); // symlink currently there
       }
       Action::SkipIdempotent { .. } => {}
+      // Root-mapped actions are applied by the elevation helper (Task 19);
+      // this simplified executor only exercises the ordinary tree.
+      Action::RootLink { .. } | Action::RootFold { .. } => {}
     }
   }
 }

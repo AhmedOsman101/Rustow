@@ -12,7 +12,7 @@
 //! The planner writes nothing. Applying is idempotent and ordered
 //! (Unfold before children, Mkdir before descendants).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -102,6 +102,19 @@ pub enum Action {
   },
   /// Already linked — nothing to do.
   SkipIdempotent {
+    dst: PathBuf,
+  },
+  /// Root-mapped file (ADR 0001): link one source file to an exact absolute
+  /// destination. Never folded, never refolded. Application/elevation is Task 19.
+  RootLink {
+    src: PathBuf,
+    dst: PathBuf,
+  },
+  /// Root-mapped directory (ADR 0001): a single fold-style symlink at
+  /// `<value>/<basename(src_dir)>`, folded against an absolute parent. Never
+  /// folded into the package's normal tree, never refolded. Task 19 applies it.
+  RootFold {
+    src_dir: PathBuf,
     dst: PathBuf,
   },
 }
@@ -213,11 +226,16 @@ pub struct Planner<'a> {
   own_dir_claims: HashSet<PathBuf>,
   /// Destinations minted by the foreign re-link; own entries claiming them are cross-package collisions.
   claimed: HashSet<PathBuf>,
+  /// Package-relative paths that are root-mapped (ADR 0001). They are withheld
+  /// from the ordinary walk at every level: never folded over, never linked
+  /// into the target tree, never refolded.
+  root_paths: HashSet<PathBuf>,
   pub actions: Vec<Action>,
   pub conflicts: Vec<Conflict>,
 }
 
 impl<'a> Planner<'a> {
+  #[allow(clippy::too_many_arguments)]
   pub fn new(
     source: &'a Path,
     target: &'a Path,
@@ -226,6 +244,7 @@ impl<'a> Planner<'a> {
     ignore: &'a Ignore,
     block_fold: HashSet<PathBuf>,
     entries_dirs: Vec<PathBuf>,
+    root_paths: HashSet<PathBuf>,
   ) -> Self {
     let own_dir_claims: HashSet<PathBuf> = entries_dirs.into_iter().collect();
     Self {
@@ -238,9 +257,17 @@ impl<'a> Planner<'a> {
       unfolded: Vec::new(),
       own_dir_claims,
       claimed: HashSet::new(),
+      root_paths,
       actions: Vec::new(),
       conflicts: Vec::new(),
     }
+  }
+
+  fn is_root_mapped(&self, pkg_rel: &Path) -> bool {
+    self
+      .root_paths
+      .iter()
+      .any(|m| pkg_rel == m || pkg_rel.starts_with(m))
   }
 
   fn pkg_root(&self) -> PathBuf {
@@ -265,7 +292,7 @@ impl<'a> Planner<'a> {
   pub fn run(mut self, entries: &[Entry]) -> Plan {
     // only top-level entries here; directories plan their own children recursively
     for entry in entries {
-      if entry.pkg_rel.components().count() != 1 {
+      if entry.pkg_rel.components().count() != 1 || self.is_root_mapped(&entry.pkg_rel) {
         continue;
       }
       let dst = self.target.join(&entry.pkg_rel);
@@ -296,7 +323,9 @@ impl<'a> Planner<'a> {
         Ok(p) => pkg_rel.join(p),
         Err(_) => continue,
       };
-      if self.ignore.is_ignored_for(self.pkg, &rel) {
+      // A fold symlink would expose the whole subtree in the target tree, so
+      // never fold over a root-mapped path (same rule as ignored paths).
+      if self.is_root_mapped(&rel) || self.ignore.is_ignored_for(self.pkg, &rel) {
         return false;
       }
     }
@@ -469,7 +498,8 @@ impl<'a> Planner<'a> {
     for child in children {
       let name = child.file_name();
       let child_pkg_rel = pkg_rel.join(&name);
-      if self.ignore.is_ignored_for(self.pkg, &child_pkg_rel) {
+      if self.is_root_mapped(&child_pkg_rel) || self.ignore.is_ignored_for(self.pkg, &child_pkg_rel)
+      {
         continue;
       }
       let child_abs = child.path();
@@ -673,12 +703,95 @@ fn validate_pkg(source: &Path, pkg: &str) -> Result<()> {
   Ok(())
 }
 
+/// Per-package root mappings (ADR 0001): package name -> (package-relative
+/// source path -> absolute destination). Values are already normalized by the
+/// config loader; trailing slashes are cosmetic and never decide the kind.
+pub type RootMappings = HashMap<String, BTreeMap<String, String>>;
+
 pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
+  plan_link_all_with_roots(input, &RootMappings::new())
+}
+
+/// Like [`plan_link_all`], but also plans the per-package `[package.<name>.root]`
+/// mappings (ADR 0001). The source path's actual filesystem type decides the
+/// mapping kind here: a directory becomes one `RootFold` at
+/// `<value>/<basename(source-dir)>`; a file becomes one `RootLink` at `value`.
+/// A mapped source that does not exist is a clean plan-time error. Mapped paths
+/// are withheld from the ordinary walk (so they never fold, refold, or take
+/// part in fold decisions) but their absolute destinations still go through
+/// the same two-phase conflict detection.
+pub fn plan_link_all_with_roots(input: &LinkInput<'_>, roots: &RootMappings) -> Result<Vec<Plan>> {
   let mut pkg_entries: HashMap<String, Vec<Entry>> = HashMap::new();
+  let mut pkg_root_actions: HashMap<String, Vec<Action>> = HashMap::new();
+  let mut pkg_root_conflicts: HashMap<String, Vec<Conflict>> = HashMap::new();
+  let mut pkg_root_paths: HashMap<String, HashSet<PathBuf>> = HashMap::new();
+
   for pkg in input.pkgs {
     validate_pkg(input.source, pkg)?;
-    pkg_entries.insert(pkg.clone(), scan_package(input.source, pkg, input.ignore)?);
+    let entries = scan_package(input.source, pkg, input.ignore)?;
+    let pkg_root = input.source.join(pkg);
+    let mut mapped: Vec<(PathBuf, PathBuf)> = Vec::new(); // (package-relative source path, abs_src)
+    let mut root_actions = Vec::new();
+    let mut root_conflicts = Vec::new();
+
+    // `roots` values are BTreeMap, so iteration (and thus action order) is
+    // deterministic by key. No slash-based decisions here: Path ignores a
+    // trailing slash on both the key and the value.
+    if let Some(mappings) = roots.get(pkg) {
+      for (key, value) in mappings {
+        let src_rel = lexical_normalize(Path::new(key));
+        let abs_src = lexical_normalize(&pkg_root.join(&src_rel));
+        let meta = fs::symlink_metadata(&abs_src).map_err(|_| {
+          Error::Config(format!(
+            "root mapping for package {pkg:?}: source path {} (key {key:?}) does not exist — nothing to link",
+            abs_src.display()
+          ))
+        })?;
+        // A symlink is a leaf, just as scan_package classifies it: only a real
+        // directory becomes a fold-style root mapping.
+        let is_dir = meta.is_dir();
+        let dst = if is_dir {
+          let base = abs_src
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| abs_src.clone());
+          lexical_normalize(&PathBuf::from(value).join(base))
+        } else {
+          lexical_normalize(Path::new(value))
+        };
+
+        probe_root_dst(&abs_src, &dst, &mut root_conflicts);
+        if is_dir {
+          root_actions.push(Action::RootFold {
+            src_dir: abs_src.clone(),
+            dst,
+          });
+        } else {
+          root_actions.push(Action::RootLink {
+            src: abs_src.clone(),
+            dst,
+          });
+        }
+        mapped.push((src_rel, abs_src));
+      }
+    }
+
+    let root_paths: HashSet<PathBuf> = mapped.iter().map(|(rel, _)| rel.clone()).collect();
+    let entries: Vec<Entry> = entries
+      .into_iter()
+      .filter(|e| {
+        !mapped
+          .iter()
+          .any(|(rel, _)| e.pkg_rel == *rel || e.pkg_rel.starts_with(rel))
+      })
+      .collect();
+
+    pkg_entries.insert(pkg.clone(), entries);
+    pkg_root_actions.insert(pkg.clone(), root_actions);
+    pkg_root_conflicts.insert(pkg.clone(), root_conflicts);
+    pkg_root_paths.insert(pkg.clone(), root_paths);
   }
+
   let blocked = compute_blocked_folds(input.target, &pkg_entries);
   let mut cross = cross_package_conflicts(input.target, &pkg_entries);
 
@@ -699,14 +812,57 @@ pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
       input.ignore,
       blocked.clone(),
       entries_dirs,
+      pkg_root_paths.get(pkg).cloned().unwrap_or_default(),
     );
     let mut plan = planner.run(&entries);
     if let Some(mut extra) = cross.remove(pkg) {
       plan.conflicts.append(&mut extra);
     }
+    if let Some(mut extra) = pkg_root_actions.remove(pkg) {
+      plan.actions.append(&mut extra);
+    }
+    if let Some(mut extra) = pkg_root_conflicts.remove(pkg) {
+      plan.conflicts.append(&mut extra);
+    }
     plans.push(plan);
   }
   Ok(plans)
+}
+
+/// Run a root-mapped destination through the same probe/conflict machinery as
+/// ordinary targets, but without fold candidacy: a root link/fold is a single
+/// symlink and is never unfolded or refolded.
+fn probe_root_dst(src: &Path, dst: &Path, conflicts: &mut Vec<Conflict>) {
+  match dst_probe(dst) {
+    Probe::Missing => {}
+    Probe::RealDir => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::DirFileMismatch,
+      src: Some(src.to_path_buf()),
+      detail: None,
+    }),
+    Probe::RealFile => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::Exists,
+      src: Some(src.to_path_buf()),
+      detail: None,
+    }),
+    Probe::Symlink(Some(resolved)) if resolved == lexical_normalize(src) => {
+      // already linked — idempotent, no conflict
+    }
+    Probe::Symlink(Some(resolved)) => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::ExternalSymlink,
+      src: Some(src.to_path_buf()),
+      detail: Some(resolved),
+    }),
+    Probe::Symlink(None) => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::DanglingExternal,
+      src: Some(src.to_path_buf()),
+      detail: None,
+    }),
+  }
 }
 
 // ---------------------------------------------------------------- apply
@@ -796,7 +952,10 @@ pub fn apply_plans(
       conflicts += plan.conflicts.len();
       for a in &plan.actions {
         match a {
-          Action::Link { .. } | Action::Fold { .. } => out.linked += 1,
+          Action::Link { .. }
+          | Action::Fold { .. }
+          | Action::RootLink { .. }
+          | Action::RootFold { .. } => out.linked += 1,
           Action::Repair { .. } => out.repaired += 1,
           _ => {}
         }
@@ -965,6 +1124,13 @@ pub fn apply_plans(
         }
       }
       Action::SkipIdempotent { .. } => {}
+      Action::RootLink { .. } | Action::RootFold { .. } => {
+        // Root-mapped actions need write access to absolute destinations and
+        // are applied through the elevation helper in Task 19. Planning emits
+        // them here and counts them like other links; this task deliberately
+        // does not touch the filesystem for them.
+        out.linked += 1;
+      }
     }
   }
   out.skipped = skip_dsts.len();
