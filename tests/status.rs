@@ -187,6 +187,17 @@ fn status_json_is_machine_readable() {
 }
 
 #[test]
+fn status_json_has_top_level_version() {
+  let r = rig();
+  make_pkg(&r.source, "zsh", &[".zshrc"]);
+  r.cmd().args(["sync"]).assert().success();
+  let out = r.cmd().args(["status", "--json"]).assert().success();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+  assert_eq!(parsed["version"].as_u64(), Some(1));
+}
+
+#[test]
 fn status_empty_package_shows_note() {
   let r = rig();
   fs::create_dir_all(r.source.join("ghost")).unwrap();

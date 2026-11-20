@@ -64,7 +64,7 @@ Table with columns `Package | Status | Notes`:
 - `Notes`: e.g. `3 not linked`, `2 conflicts`, `empty package`, or a short reason.
 - No positional args -> all packages; package names -> filter.
 - `-s|--short`: print only the summary line.
-- `--json`: `{ "packages": [...], "summary": {...} }`.
+- `--json`: `{ "version": 1, "packages": [...], "summary": {...} }`. `version` is a top-level schema marker for machine consumers (ADR 0005); it is frozen for the v0.1 line and bumps only when the output shape changes in a breaking way. The field is additive — consumers that ignore unknown keys are unaffected.
 - Exit 0 iff every inspected package is `linked` and conflict-free; else 1.
 
 ## Config file

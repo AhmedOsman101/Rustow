@@ -58,6 +58,8 @@ pub struct Summary {
 
 #[derive(Debug, Serialize)]
 pub struct JsonOutput {
+  /// Schema version for machine consumers; bumped only on breaking shape changes (ADR 0005).
+  pub version: u8,
   pub packages: Vec<PackageStatus>,
   pub summary: Summary,
 }
@@ -340,6 +342,7 @@ pub fn render_table(packages: &[PackageStatus], no_color: bool) -> String {
 pub fn render_json(packages: &[PackageStatus]) -> Result<String> {
   let summary = summarize(packages);
   let out = JsonOutput {
+    version: 1,
     packages: packages.to_vec(),
     summary,
   };
