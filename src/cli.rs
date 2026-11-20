@@ -188,6 +188,15 @@ pub enum ConfigCommands {
     #[arg(long, value_name = "PATH")]
     path: Option<PathBuf>,
   },
+  /// Adopt values from ~/.stowrc into config.toml (ADR 0004).
+  Migrate {
+    /// Adopt without prompting.
+    #[arg(long)]
+    yes: bool,
+    /// Read stowrc from a custom path instead of ~/.stowrc.
+    #[arg(long, value_name = "PATH", hide = true)]
+    stowrc: Option<PathBuf>,
+  },
 }
 
 /// Direct subdirectories of the source dir, sorted by name.
@@ -623,6 +632,29 @@ impl ConflictResolver for PromptResolver {
   }
 }
 
+/// Ask `[a]dopt / [s]kip` on stdin. A simple line reader (not dialoguer) keeps
+/// the prompt drivable through the real binary with piped stdin; EOF = skip.
+fn prompt_adopt() -> Result<bool> {
+  use std::io::{BufRead, Write};
+
+  print!("adopt these values into config.toml? [a]dopt / [s]kip: ");
+  std::io::stdout()
+    .flush()
+    .map_err(|e| Error::Message(format!("failed to flush prompt: {e}")))?;
+  let mut line = String::new();
+  let n = std::io::stdin()
+    .lock()
+    .read_line(&mut line)
+    .map_err(|e| Error::Message(format!("failed to read prompt answer: {e}")))?;
+  if n == 0 {
+    return Ok(false);
+  }
+  Ok(matches!(
+    line.trim().to_ascii_lowercase().as_str(),
+    "a" | "adopt"
+  ))
+}
+
 pub fn run(cli: Cli) -> Result<i32> {
   match cli.command {
     Commands::Config(cmd) => match cmd {
@@ -634,6 +666,36 @@ pub fn run(cli: Cli) -> Result<i32> {
         let path = path.unwrap_or_else(config::config_path);
         let written = config::write_default(&path, force)?;
         println!("wrote {}", written.display());
+        Ok(0)
+      }
+      ConfigCommands::Migrate { yes, stowrc } => {
+        // Reuse the global --dry-run flag; Migrate has no flag of its own.
+        let dry_run = cli.global.dry_run;
+        let stowrc_path = stowrc.unwrap_or_else(config::stowrc_path);
+        let config_path = config::config_path();
+        let plan = config::migrate_stowrc(&config_path, &stowrc_path)?;
+        for w in &plan.warnings {
+          eprintln!("rustow: warning: {w}");
+        }
+        if plan.is_empty() {
+          println!("nothing to adopt — config already sets every value stowrc can supply");
+          return Ok(0);
+        }
+        print!("{}", plan.render_diff());
+        if dry_run {
+          println!("dry run: no files changed");
+          return Ok(0);
+        }
+        if yes || prompt_adopt()? {
+          let written = plan.apply()?;
+          println!("wrote {}", written.display());
+          println!(
+            "note: stowrc left untouched — you can remove it now ({} is inert once config.toml exists)",
+            stowrc_path.display()
+          );
+        } else {
+          println!("skipped — config unchanged");
+        }
         Ok(0)
       }
     },

@@ -1070,3 +1070,223 @@ mod task3_tests {
     assert!(provenance_silenced_at(&stamp));
   }
 }
+
+// --- Task 21: shared stowrc adoption (ADR 0004) -----------------------------
+
+/// One value that would be adopted from stowrc into config.toml.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateAddition {
+  /// Top-level config key: `source`, `target`, or `verbose`.
+  pub key: &'static str,
+  /// Human-readable value for the printed diff (unquoted).
+  pub value: String,
+  /// TOML literal written to the file (quoted string or boolean).
+  pub toml: String,
+}
+
+/// A side-effect-free plan produced by [`migrate_stowrc`], reused by both
+/// `config migrate` and `config init`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigratePlan {
+  pub config_path: PathBuf,
+  pub stowrc_path: PathBuf,
+  /// Only the gaps: keys the config does not already set.
+  pub additions: Vec<MigrateAddition>,
+  /// Unsupported stowrc options, reported but never fatal.
+  pub warnings: Vec<String>,
+  /// Whether the destination config file existed when the plan was built.
+  pub config_existed: bool,
+}
+
+impl MigratePlan {
+  pub fn is_empty(&self) -> bool {
+    self.additions.is_empty()
+  }
+
+  /// The adoption diff printed by `config migrate` (and `config init`).
+  pub fn render_diff(&self) -> String {
+    let mut s = String::from("stowrc -> config.toml (only values config leaves unset):\n");
+    for a in &self.additions {
+      s.push_str(&format!("  + {} = {}\n", a.key, a.value));
+    }
+    s
+  }
+
+  /// Write the adopted values into the config file, preserving everything
+  /// already in it. Only top-level scalar keys are inserted, always before
+  /// the first table header so they stay at the document root.
+  pub fn apply(&self) -> Result<PathBuf> {
+    let original = if self.config_existed && self.config_path.exists() {
+      fs::read_to_string(&self.config_path).map_err(Error::io(&self.config_path))?
+    } else {
+      String::new()
+    };
+    let lines: Vec<String> = self
+      .additions
+      .iter()
+      .map(|a| format!("{} = {}", a.key, a.toml))
+      .collect();
+    let merged = merge_top_level_keys(&original, &lines);
+    if let Some(parent) = self.config_path.parent() {
+      fs::create_dir_all(parent).map_err(Error::io(parent))?;
+    }
+    fs::write(&self.config_path, merged).map_err(Error::io(&self.config_path))?;
+    Ok(self.config_path.clone())
+  }
+}
+
+/// Quote a string as a TOML basic string (mirrors `write_resolved`'s escaping).
+fn quote_toml_string(s: &str) -> String {
+  let esc = s.replace('\\', "\\\\").replace('"', "\\\"");
+  format!("\"{esc}\"")
+}
+
+/// Which top-level keys are explicitly present in the config text. An empty
+/// document has none. Parsing failures surface as a clean config error.
+fn present_top_level_keys(text: &str) -> Result<std::collections::HashSet<String>> {
+  if text.trim().is_empty() {
+    return Ok(std::collections::HashSet::new());
+  }
+  let table: toml::Table =
+    toml::from_str(text).map_err(|e| Error::Config(format!("failed to parse config.toml: {e}")))?;
+  Ok(table.into_iter().map(|(k, _)| k).collect())
+}
+
+/// A path adopted from stowrc must already be a directory. A stowrc that
+/// parses but points at a moved/deleted directory must never become a config
+/// pointing at nothing (Review Focus #2).
+fn validate_migrate_dir(path: &Path, key: &str) -> Result<()> {
+  if !path.is_dir() {
+    return Err(Error::Config(format!(
+      "stowrc {key} path {} does not exist or is not a directory — refusing to write a config pointing at nothing",
+      path.display()
+    )));
+  }
+  Ok(())
+}
+
+/// Insert `lines` (complete `key = value` statements) at the document root of
+/// `original`, preserving all existing text. They go before the first active
+/// table header (a line starting with `[`), or at the end when there is none.
+fn merge_top_level_keys(original: &str, lines: &[String]) -> String {
+  if lines.is_empty() {
+    return original.to_string();
+  }
+  let mut insertion = original.len();
+  let mut offset = 0usize;
+  for seg in original.split_inclusive('\n') {
+    if seg.trim_start().starts_with('[') {
+      insertion = offset;
+      break;
+    }
+    offset += seg.len();
+  }
+
+  let mut out = String::new();
+  out.push_str(&original[..insertion]);
+  if insertion == original.len() && !original.is_empty() && !original.ends_with('\n') {
+    out.push('\n');
+  }
+  for line in lines {
+    out.push_str(line);
+    out.push('\n');
+  }
+  if insertion < original.len() {
+    out.push('\n');
+  }
+  out.push_str(&original[insertion..]);
+  out
+}
+
+/// Build a migration plan from a stowrc file for a given destination config.
+///
+/// Reads and validates `stowrc_path`, then adopts only the values that the
+/// config at `config_path` leaves UNSET (`source`, `target`, `verbose`).
+/// Existing config values always win. The stowrc is never modified, and this
+/// function never writes anything — callers print [`MigratePlan::render_diff`]
+/// and, if the user agrees, [`MigratePlan::apply`].
+pub fn migrate_stowrc(config_path: &Path, stowrc_path: &Path) -> Result<MigratePlan> {
+  let contents = fs::read_to_string(stowrc_path).map_err(Error::io(stowrc_path))?;
+  let parsed = parse_stowrc(&contents)?;
+
+  let (config_text, config_existed) = if config_path.exists() {
+    (
+      fs::read_to_string(config_path).map_err(Error::io(config_path))?,
+      true,
+    )
+  } else {
+    (String::new(), false)
+  };
+  let present = present_top_level_keys(&config_text)?;
+
+  let mut additions = Vec::new();
+  if !present.contains("source")
+    && let Some(src) = &parsed.source
+  {
+    validate_migrate_dir(src, "source")?;
+    additions.push(MigrateAddition {
+      key: "source",
+      value: src.to_string_lossy().into_owned(),
+      toml: quote_toml_string(&src.to_string_lossy()),
+    });
+  }
+  if !present.contains("target")
+    && let Some(tgt) = &parsed.target
+  {
+    validate_migrate_dir(tgt, "target")?;
+    additions.push(MigrateAddition {
+      key: "target",
+      value: tgt.to_string_lossy().into_owned(),
+      toml: quote_toml_string(&tgt.to_string_lossy()),
+    });
+  }
+  if !present.contains("verbose")
+    && let Some(v) = parsed.verbose
+  {
+    additions.push(MigrateAddition {
+      key: "verbose",
+      value: v.to_string(),
+      toml: v.to_string(),
+    });
+  }
+
+  Ok(MigratePlan {
+    config_path: config_path.to_path_buf(),
+    stowrc_path: stowrc_path.to_path_buf(),
+    additions,
+    warnings: parsed.warnings,
+    config_existed,
+  })
+}
+
+#[cfg(test)]
+mod migrate_tests {
+  use super::*;
+
+  #[test]
+  fn merge_inserts_before_table_and_preserves_existing_text() {
+    let original = "# my config\nsource = \"/keep\"\n\n[package.foo]\nincludes = [\"**\"]\n";
+    let lines = vec![
+      "target = \"/new\"".to_string(),
+      "verbose = false".to_string(),
+    ];
+    let merged = merge_top_level_keys(original, &lines);
+    let parsed: toml::Table = toml::from_str(&merged).unwrap();
+    assert_eq!(parsed.get("source").unwrap().as_str(), Some("/keep"));
+    assert_eq!(parsed.get("target").unwrap().as_str(), Some("/new"));
+    assert_eq!(parsed.get("verbose").unwrap().as_bool(), Some(false));
+    assert!(merged.find("target = ").unwrap() < merged.find("[package.foo]").unwrap());
+    assert!(merged.starts_with("# my config"));
+  }
+
+  #[test]
+  fn merge_appends_to_empty_document() {
+    let merged = merge_top_level_keys("", &["source = \"/new\"".to_string()]);
+    assert_eq!(merged, "source = \"/new\"\n");
+  }
+
+  #[test]
+  fn quote_toml_string_escapes_backslash_and_quote() {
+    assert_eq!(quote_toml_string("C:\\a\"b"), "\"C:\\\\a\\\"b\"");
+  }
+}
