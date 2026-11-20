@@ -6,7 +6,8 @@
 //! to render, then send arrow keys + Enter to pick an option. Every fixture
 //! isolates HOME / XDG_* / DOTFILES_* under `/tmp/opencode`; the real dotfiles
 //! are never touched. The child is always driven to completion and reaped
-//! here — no signals, no stray processes.
+//! here; an RAII guard also cleans up this fixture's own child if a panic
+//! unwinds first — no signals to any other process, no stray processes.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -15,7 +16,63 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+
+/// Owns exactly one child spawned by `Rig::run_pty` plus its output reader.
+/// Normal completion calls `reap` (which clears `child`); on unwind `Drop`
+/// kills and waits only that child, then joins the reader thread. No other
+/// process is ever signalled by this test binary.
+struct ChildGuard {
+  child: Option<Box<dyn Child + Send + Sync>>,
+  reader: Option<thread::JoinHandle<()>>,
+}
+
+impl ChildGuard {
+  fn new(child: Box<dyn Child + Send + Sync>) -> Self {
+    Self {
+      child: Some(child),
+      reader: None,
+    }
+  }
+
+  fn attach_reader(&mut self, reader: thread::JoinHandle<()>) {
+    self.reader = Some(reader);
+  }
+
+  /// Normal path: wait for the child and mark it reaped so `Drop` is a no-op.
+  fn reap(&mut self) -> u32 {
+    let code = self
+      .child
+      .as_mut()
+      .expect("child already reaped")
+      .wait()
+      .unwrap()
+      .exit_code();
+    self.child = None;
+    code
+  }
+
+  fn join_reader(&mut self) {
+    if let Some(reader) = self.reader.take() {
+      reader.join().unwrap();
+    }
+  }
+}
+
+impl Drop for ChildGuard {
+  fn drop(&mut self) {
+    if let Some(child) = self.child.as_mut() {
+      // Unwind path: this is the child this fixture spawned and never reaped.
+      if matches!(child.try_wait(), Ok(None)) {
+        let _ = child.kill();
+      }
+      let _ = child.wait();
+    }
+    if let Some(reader) = self.reader.take() {
+      let _ = reader.join();
+    }
+  }
+}
 
 struct Rig {
   _tmp: tempfile::TempDir,
@@ -77,8 +134,8 @@ impl Rig {
 
   /// Spawn the real binary on a PTY, wait for the conflict select to render,
   /// send `downs` Down arrows + Enter, reap the child, and return its exit
-  /// code plus the full transcript. The child is always released and waited
-  /// on — this test never signals or reparents a process.
+  /// code plus the full transcript. A `ChildGuard` owns the child from the
+  /// moment it is spawned so a panic cannot orphan it.
   fn run_pty(&self, args: &[&str], downs: usize) -> (u32, String) {
     let bin = assert_cmd::cargo::cargo_bin("rustow");
     let pair = native_pty_system()
@@ -100,7 +157,8 @@ impl Rig {
     cmd.env("TERM", "xterm-256color");
     cmd.env("NO_COLOR", "1");
 
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let child = pair.slave.spawn_command(cmd).unwrap();
+    let mut guard = ChildGuard::new(child); // own it before anything else can panic
     drop(pair.slave); // parent must not hold the slave open: the reader needs EOF
 
     let output = Arc::new(Mutex::new(Vec::new()));
@@ -117,6 +175,7 @@ impl Rig {
         }
       }
     });
+    guard.attach_reader(reader_thread);
 
     let mut writer = pair.master.take_writer().unwrap();
     let prompt = b"what would you like to do?";
@@ -136,10 +195,10 @@ impl Rig {
     keys.push(b'\r'); // Enter
     let _ = writer.write_all(&keys); // EIO means the child already exited
 
-    let status = child.wait().unwrap();
-    reader_thread.join().unwrap();
+    let code = guard.reap();
+    guard.join_reader();
     let text = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
-    (status.exit_code(), text)
+    (code, text)
   }
 }
 
@@ -178,13 +237,16 @@ fn pty_conflict_skip_leaves_file_in_place() {
   assert_eq!(fs::read_to_string(&dst).unwrap(), "user contents\n");
 }
 
-/// Pins a known pre-existing gap (Task 2 reviewer note): with
+/// Documents a known pre-existing gap (Task 2 reviewer note): with
 /// `on_conflict = prompt` on a TTY, `relink` defers its conflict decision to
-/// the post-unlink prompt. Choosing "abort everything" there then reports
-/// "nothing was changed" even though the unlink already happened. The test
-/// records today's behaviour so a future fix cannot change it silently.
+/// the post-unlink prompt, so aborting there reports "nothing was changed"
+/// although the unlink already happened. Ignored because it asserts the
+/// CORRECT post-fix behaviour, not today's defect: links stay in place and
+/// the failure message is truthful. Run explicitly with `--ignored` to
+/// reproduce the gap (it fails until the bug is fixed).
 #[test]
-fn pty_relink_prompt_abort_reports_nothing_changed_after_unlink() {
+#[ignore = "known bug: relink unlinks before the abort prompt; restore links before resolving"]
+fn pty_relink_prompt_abort_keeps_links_and_reports_conflict() {
   let r = rig();
   r.write_config();
   for (pkg, files) in [
@@ -215,11 +277,22 @@ fn pty_relink_prompt_abort_reports_nothing_changed_after_unlink() {
   // at the destination here, so the items are overwrite/skip/abort).
   let (code, text) = r.run_pty(&["relink", "alpha", "beta"], 2);
   assert_eq!(code, 1, "transcript: {text}");
-  assert!(
-    contains(text.as_bytes(), b"nothing was changed"),
-    "transcript: {text}"
-  );
-  // The gap: the unlink phase already removed both links.
-  assert!(!r.target.join(".bashrc").exists(), "transcript: {text}");
-  assert!(!r.target.join(".sharedrc").exists(), "transcript: {text}");
+  // An accurate failure message names the conflict. Exact wording is
+  // deliberately not pinned to today's misleading "nothing was changed"
+  // line: after the fix that phrase may remain, but only when the tree
+  // really is unchanged.
+  assert!(contains(text.as_bytes(), b"conflict"), "transcript: {text}");
+  // Correct behaviour: aborting at the post-unlink prompt leaves both links
+  // where they were, pointing at alpha. Today they are already gone.
+  for leaf in [".bashrc", ".sharedrc"] {
+    let dst = r.target.join(leaf);
+    let meta = fs::symlink_metadata(&dst)
+      .unwrap_or_else(|e| panic!("{leaf} is gone ({e}); transcript: {text}"));
+    assert!(meta.file_type().is_symlink(), "{leaf} is no longer a link");
+    assert_eq!(
+      fs::read_link(&dst).unwrap(),
+      r.source.join("alpha").join(leaf),
+      "{leaf} points somewhere else"
+    );
+  }
 }
