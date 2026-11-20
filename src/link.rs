@@ -1048,9 +1048,14 @@ pub struct UnlinkPlan {
 
 /// Sweep the *target* tree for symlinks pointing into `source` whose
 /// destinations are missing — the stow-style `stow -c`.
-/// Does not touch anything owned by another package or external to `source`.
-pub fn plan_clean(source: &Path, target: &Path, _ignore: &Ignore) -> Result<UnlinkPlan> {
+/// Never descends into `source` (or the ancestor dirs leading to it when it is
+/// nested under `target`), and skips links whose package-relative path is
+/// ignored. Does not touch anything owned by another package or external to
+/// `source`.
+pub fn plan_clean(source: &Path, target: &Path, ignore: &Ignore) -> Result<UnlinkPlan> {
   let mut plan = UnlinkPlan::default();
+  let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| lexical_normalize(p));
+  let source_canon = canon(source);
   let mut stack = vec![target.to_path_buf()];
   while let Some(dir) = stack.pop() {
     let rd = match fs::read_dir(&dir) {
@@ -1064,18 +1069,37 @@ pub fn plan_clean(source: &Path, target: &Path, _ignore: &Ignore) -> Result<Unli
         Err(_) => continue,
       };
       if meta.is_symlink() {
-        if let Some(abs) = resolve_symlink(&path)
-          && abs.starts_with(source)
-          && !abs.exists()
-        {
-          plan
-            .actions
-            .push(UnlinkAction::Unlink { dst: path.clone() });
-          if let Some(parent) = path.parent() {
-            plan.candidate_dirs.insert(parent.to_path_buf());
-          }
+        let Some(abs) = resolve_symlink(&path) else {
+          continue;
+        };
+        if !abs.starts_with(source) || abs.exists() {
+          continue;
+        }
+        // `ignore` applies to the path inside the package the link points
+        // into: drop the `<source>/<pkg>` prefix first.
+        let Some(from_source) = abs.strip_prefix(source).ok() else {
+          continue;
+        };
+        let mut comps = from_source.components();
+        let Some(std::path::Component::Normal(_pkg)) = comps.next() else {
+          continue;
+        };
+        if ignore.is_ignored(&comps.collect::<PathBuf>()) {
+          continue;
+        }
+        plan
+          .actions
+          .push(UnlinkAction::Unlink { dst: path.clone() });
+        if let Some(parent) = path.parent() {
+          plan.candidate_dirs.insert(parent.to_path_buf());
         }
       } else if meta.is_dir() {
+        let dir_canon = canon(&path);
+        // Prune source itself, anything below it, and (when source lives under
+        // target) the ancestor chain that would lead the walk into it.
+        if dir_canon.starts_with(&source_canon) || source_canon.starts_with(&dir_canon) {
+          continue;
+        }
         stack.push(path);
       }
     }
