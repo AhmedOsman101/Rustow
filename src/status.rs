@@ -149,6 +149,20 @@ pub fn compute_package(
             });
           }
         }
+      } else if fs::symlink_metadata(&dst).is_ok() && !dst.is_dir() {
+        // A real file sits where the package expects a directory. The
+        // planner rejects this as ConflictReason::DirFileMismatch
+        // (link.rs `plan_dir`, Probe::RealFile arm); status must agree.
+        //
+        // NOTE: the planner's `Probe`/`dst_probe` and conflict verdicts are
+        // private to link.rs and out of scope here, so this classification is
+        // intentionally duplicated. Keep it in sync with the planner's
+        // Probe::RealFile -> DirFileMismatch arm.
+        conflicts += 1;
+        issues.push(EntryIssue {
+          target: dst.display().to_string(),
+          reason: "file where directory expected".to_string(),
+        });
       }
       // real dir (or missing) — children are checked individually
       continue;

@@ -10,6 +10,7 @@ struct Rig {
   source: std::path::PathBuf,
   target: std::path::PathBuf,
   xdg: std::path::PathBuf,
+  home: std::path::PathBuf,
 }
 
 fn rig() -> Rig {
@@ -17,14 +18,18 @@ fn rig() -> Rig {
   let source = tmp.path().join("Configs");
   let target = tmp.path().join("home");
   let xdg = tmp.path().join("xdg");
+  // empty per-fixture HOME: never read the real ~/.stowrc
+  let home = tmp.path().join("userhome");
   fs::create_dir_all(&source).unwrap();
   fs::create_dir_all(&target).unwrap();
   fs::create_dir_all(&xdg).unwrap();
+  fs::create_dir_all(&home).unwrap();
   Rig {
     _tmp: tmp,
     source,
     target,
     xdg,
+    home,
   }
 }
 
@@ -34,6 +39,7 @@ impl Rig {
     cmd
       .env("XDG_CONFIG_HOME", &self.xdg)
       .env("XDG_CACHE_HOME", &self.xdg)
+      .env("HOME", &self.home)
       .env("DOTFILES_DIR", &self.source)
       .env("DOTFILES_TARGET", &self.target)
       .env("NO_COLOR", "1");
@@ -95,6 +101,44 @@ fn status_conflict_exit_one() {
   let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
   assert!(text.contains("conflict"), "expected conflict, got: {text}");
   assert!(text.contains("1 conflicts"));
+}
+
+#[test]
+fn status_file_where_directory_expected_is_conflict() {
+  let r = rig();
+  // the package expects a directory at .config; a real file occupies it
+  make_pkg(&r.source, "pkg", &[".config/eza/theme.yml"]);
+  fs::write(r.target.join(".config"), "user contents").unwrap();
+  let out = r.cmd().args(["status", "-v", "pkg"]).assert().failure();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("conflict"), "expected conflict, got: {text}");
+  assert!(
+    text.contains("1 conflicts"),
+    "expected one conflict, got: {text}"
+  );
+  assert!(
+    text.contains("file where directory expected"),
+    "expected kind-mismatch reason, got: {text}"
+  );
+}
+
+#[test]
+fn status_directory_where_leaf_expected_is_conflict() {
+  let r = rig();
+  // regression guard: this arm already reported a conflict before the dir-arm fix
+  make_pkg(&r.source, "pkg", &[".zshrc"]);
+  fs::create_dir(r.target.join(".zshrc")).unwrap();
+  let out = r.cmd().args(["status", "-v", "pkg"]).assert().failure();
+  let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+  assert!(text.contains("conflict"), "expected conflict, got: {text}");
+  assert!(
+    text.contains("1 conflicts"),
+    "expected one conflict, got: {text}"
+  );
+  assert!(
+    text.contains("is a real directory"),
+    "expected leaf kind-mismatch reason, got: {text}"
+  );
 }
 
 #[test]
