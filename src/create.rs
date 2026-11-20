@@ -29,6 +29,8 @@ pub struct CreateContext {
   pub fold: bool,
   pub fold_ignore: Vec<String>,
   pub ignore_globs: Vec<String>,
+  /// Per-package includes, so `create` links an existing package exactly as `link` would.
+  pub package: std::collections::HashMap<String, crate::config::PackageConfig>,
   /// Same conflict policy as `link` (selected from global flags/config).
   pub conflict_resolver: Box<dyn ConflictResolver>,
 }
@@ -565,7 +567,7 @@ fn link_existing(ctx: &mut CreateContext, app: &str) -> Result<CreateOutcome> {
       linked: false,
     });
   }
-  let ignore = crate::ignore::Ignore::new(&ctx.ignore_globs)?;
+  let ignore = crate::ignore::Ignore::with_packages(&ctx.ignore_globs, &ctx.package)?;
   let pkgs = vec![app.to_string()];
   let plans = link::plan_link_all(&link::LinkInput {
     source: &ctx.source_dir,

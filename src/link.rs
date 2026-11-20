@@ -54,7 +54,7 @@ pub fn scan_package(source: &Path, pkg: &str, ignore: &Ignore) -> Result<Vec<Ent
       Ok(p) => p.to_path_buf(),
       Err(_) => continue,
     };
-    if ignore.is_ignored(&rel) {
+    if ignore.is_ignored_for(pkg, &rel) {
       continue;
     }
     let ft = entry.file_type();
@@ -296,7 +296,7 @@ impl<'a> Planner<'a> {
         Ok(p) => pkg_rel.join(p),
         Err(_) => continue,
       };
-      if self.ignore.is_ignored(&rel) {
+      if self.ignore.is_ignored_for(self.pkg, &rel) {
         return false;
       }
     }
@@ -423,7 +423,7 @@ impl<'a> Planner<'a> {
           continue;
         };
         let full_pkg_rel = prefix.join(&subtree_rel);
-        if self.ignore.is_ignored(&full_pkg_rel) {
+        if self.ignore.is_ignored_for(&foreign_pkg, &full_pkg_rel) {
           continue;
         }
         let child_dst = dst.join(&subtree_rel);
@@ -469,7 +469,7 @@ impl<'a> Planner<'a> {
     for child in children {
       let name = child.file_name();
       let child_pkg_rel = pkg_rel.join(&name);
-      if self.ignore.is_ignored(&child_pkg_rel) {
+      if self.ignore.is_ignored_for(self.pkg, &child_pkg_rel) {
         continue;
       }
       let child_abs = child.path();

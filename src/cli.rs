@@ -215,7 +215,7 @@ impl<'a> App<'a> {
   }
 
   fn ignore(&self) -> Result<Ignore> {
-    Ignore::new(&self.resolved.cfg.ignore)
+    Ignore::with_packages(&self.resolved.cfg.ignore, &self.resolved.cfg.package)
   }
 
   fn source(&self) -> &Path {
@@ -566,6 +566,7 @@ pub fn run(cli: Cli) -> Result<i32> {
         fold: app_state.resolved.cfg.fold,
         fold_ignore: app_state.resolved.cfg.fold_ignore.clone(),
         ignore_globs: app_state.resolved.cfg.ignore.clone(),
+        package: app_state.resolved.cfg.package.clone(),
         conflict_resolver: app_state.make_resolver(),
       };
       let opts = crate::create::CreateOptions {
