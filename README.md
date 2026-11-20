@@ -63,6 +63,18 @@ Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, 
 
 `unlink` requires at least one package argument; `reset` does everything at once. `relink` takes packages explicitly — there is no `relink` with no arguments (use `reset && sync`).
 
+## Exit codes
+
+rustow follows the Unix/clap convention ([ADR 0003](./docs/adr/0003-exit-codes.md)):
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Success. For `status`, every inspected package is fully linked and conflict-free. |
+| `1` | General failure: unresolved conflicts, runtime errors, or you declining an interactive prompt. |
+| `2` | Usage error: unknown or malformed arguments (clap's built-in behavior). |
+
+There is no separate code for "user aborted" — declining a prompt is just a runtime failure. stderr always names the reason, so scripts that need to tell cases apart should read it.
+
 ## Link semantics
 
 - Package tree mirrors the target root (`$HOME`); `<pkg>/.config/foo/bar` links to `~/.config/foo/bar`.

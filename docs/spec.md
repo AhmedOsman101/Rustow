@@ -147,11 +147,15 @@ Merge UX (real-file conflict, user picks `m`): message explaining they should ed
 
 ## Exit codes
 
-As implemented (and now relied on by scripts):
+Per [ADR 0003](./adr/0003-exit-codes.md) (binding contract):
 
-- `0` — success; for `status`, every inspected package is fully linked.
-- `1` — conflicts, status health failure, or any other error (printed to stderr).
-- `2` — user aborted (e.g. answered "abort" at a conflict prompt).
+| Code | Meaning                                                                                  |
+| ---- | ---------------------------------------------------------------------------------------- |
+| `0`  | Success (`status`: every inspected package fully linked and conflict-free)             |
+| `1`  | General failure: unresolved conflicts, runtime errors, and the user declining an interactive prompt |
+| `2`  | Usage error: unknown/malformed CLI arguments (clap's built-in behavior)                 |
+
+No separate meanings are invented. In particular, an interactive "abort" is not distinct from any other runtime failure; anyone who wants to distinguish them watches stderr, which always names the reason.
 
 ## Implementation layout
 

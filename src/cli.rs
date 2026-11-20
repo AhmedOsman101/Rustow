@@ -646,7 +646,9 @@ pub fn main_entry() -> i32 {
       eprintln!("{report}");
       1
     }
-    Err(Error::Aborted) => 2,
+    // ADR 0003: every failure that is not a clap usage error is code 1.
+    // `Error::Aborted` (the user declining an interactive prompt) is no
+    // exception — it falls through here so stderr still names the reason.
     Err(e) => {
       eprintln!("error: {e}");
       1
