@@ -193,3 +193,36 @@ fn includes_hiding_everything_is_empty_noop_and_status_unlinked() {
     "status must honestly report the unlinked package, got: {text}"
   );
 }
+
+/// (g) Refolding on unlink is folding too: when the only remaining links in a
+/// shared directory belong to a package whose `includes` hides a file in that
+/// subtree, a refold would expose the hidden file through a symlink. ADR 0002
+/// requires the refold to be refused.
+#[test]
+fn refold_on_unlink_respects_package_includes() {
+  let r = rig("ignore = []\n\n[package.alpha]\nincludes = [\"**\", \"!**/*.local\"]\n");
+  r.make_pkg("alpha", &[".config/settings", ".config/cache.local"]);
+  r.make_pkg("beta", &[".config/other"]);
+
+  // Both packages claim .config, so it is linked per-file rather than folded.
+  r.cmd().args(["link", "alpha", "beta"]).assert().success();
+  assert!(r.dst(".config").is_dir() && !r.dst(".config").is_symlink());
+  assert!(r.dst(".config/settings").is_symlink());
+  assert!(r.dst(".config/other").is_symlink());
+  assert!(
+    !r.dst(".config/cache.local").exists(),
+    "alpha's hidden file must not be linked in the first place"
+  );
+
+  // Unlinking beta leaves only alpha's link in .config; a refold to
+  // source/<alpha>/.config would expose cache.local, which includes hide.
+  r.cmd().args(["unlink", "beta"]).assert().success();
+
+  assert!(
+    !r.dst(".config").is_symlink(),
+    "refold to alpha's .config must be refused: it would expose cache.local"
+  );
+  assert!(r.dst(".config").is_dir());
+  assert!(r.dst(".config/settings").is_symlink());
+  assert!(!r.dst(".config/cache.local").exists());
+}

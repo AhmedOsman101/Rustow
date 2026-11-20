@@ -1250,6 +1250,7 @@ pub fn refolded_dir(
     return None; // empty — handled by rmdir
   }
   let mut common: Option<PathBuf> = None;
+  let mut owner: Option<String> = None;
   for child in &children {
     let meta = fs::symlink_metadata(child).ok()?;
     if !meta.file_type().is_symlink() {
@@ -1271,6 +1272,10 @@ pub fn refolded_dir(
     if rest != rel || !source.join(pkg_name).is_dir() {
       return None; // not a <source>/<pkg>/<rel> shape — refuse to refold anything else
     }
+    // All children resolve into the same package subtree (checked by `common`
+    // below); remember its name so the ignore walk can apply that package's
+    // `includes` instead of only the global rules (ADR 0002).
+    owner = Some(pkg_name.to_string_lossy().into_owned());
     match &common {
       None => common = Some(pkg_dir),
       Some(c) if *c == pkg_dir => {}
@@ -1278,8 +1283,10 @@ pub fn refolded_dir(
     }
   }
   let package_dir = common?;
+  let owner = owner?;
   // never refold a subtree containing ignored paths (e.g. nested .git) —
-  // the spec's "ignored data is never exposed through a symlink" covers unlink too
+  // the spec's "ignored data is never exposed through a symlink" covers unlink
+  // too, including paths hidden by this package's `includes` (ADR 0002)
   for item in WalkDir::new(&package_dir)
     .follow_links(false)
     .into_iter()
@@ -1290,7 +1297,7 @@ pub fn refolded_dir(
       Ok(p) => p,
       Err(_) => continue,
     };
-    if ignore.is_ignored(&rel.join(sub)) {
+    if ignore.is_ignored_for(&owner, &rel.join(sub)) {
       return None;
     }
   }
