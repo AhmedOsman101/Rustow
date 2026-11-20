@@ -150,8 +150,14 @@ pub fn load_file() -> Result<Option<Config>> {
 }
 
 /// The annotated default configuration, printed by `config default` and written by `config init`.
-pub const DEFAULT_CONFIG_TOML: &str = r#"# rustow — default configuration
-# Docs: https://github.com/othman-moussa/rustow
+///
+/// The docs URL is embedded from Cargo.toml's `repository` field, so the generated
+/// config cannot drift from the project's canonical repository.
+pub const DEFAULT_CONFIG_TOML: &str = concat!(
+  r#"# rustow — default configuration
+# Docs: "#,
+  env!("CARGO_PKG_REPOSITORY"),
+  r#"
 # Precedence: CLI flags > env vars (DOTFILES_DIR, DOTFILES_TARGET) > this file.
 
 # Stow directory; its direct subdirectories are the packages.
@@ -205,7 +211,8 @@ ignore = [
 #   overwrite — target is deleted; symlink to the package's version
 #   adopt     — target's content is moved into the package; symlink
 on_conflict = "prompt"
-"#;
+"#
+);
 
 /// Render the default configuration as a TOML string (parses as `Config`).
 pub fn print_default() -> String {

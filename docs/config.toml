@@ -1,5 +1,5 @@
 # rustow — default configuration
-# Docs: https://github.com/othman-moussa/rustow
+# Docs: https://github.com/AhmedOsman101/Rustow
 # Precedence: CLI flags > env vars (DOTFILES_DIR, DOTFILES_TARGET) > this file.
 
 # Stow directory; its direct subdirectories are the packages.
