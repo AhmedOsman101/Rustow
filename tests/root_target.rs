@@ -1281,3 +1281,57 @@ fn unlink_dry_run_counts_root_links() {
     "dry run must not invoke elevation"
   );
 }
+
+// --- F2 (final whole-branch review): `create` must apply root mappings ------
+//
+// `link_existing` previously planned with no roots, so a package created or
+// re-linked through `rustow create` silently dropped its
+// `[package.<name>.root]` mappings. These tests drive the real binary with a
+// stub elevate_cmd; every path (including the tempdir "etc") is isolated.
+
+/// A root-mapped package linked via `create` routes its elevated step through
+/// the same gate as `link`: the mapped destination is linked and the ordinary
+/// home link is created too.
+#[test]
+fn create_applies_root_mappings_via_elevate_stub() {
+  let r = elev_rig(true);
+  r.make_pkg(); // app/app.ini (root-mapped) + app/.zshrc (ordinary)
+
+  r.cmd()
+    .args(["create", "app", "--yes", "--as-root"])
+    .assert()
+    .success();
+
+  assert!(
+    r.dest().is_symlink(),
+    "create must link the mapped destination: {}",
+    r.dest().display()
+  );
+  assert_eq!(
+    fs::read_link(r.dest()).unwrap(),
+    r.source.join("app/app.ini")
+  );
+  assert!(
+    r.ordinary().is_symlink(),
+    "ordinary link must still be created by create"
+  );
+  let log = fs::read_to_string(&r.log).unwrap();
+  assert!(log.contains("ln -s"), "elevated link via stub: {log}");
+}
+
+/// A package with no root mapping still links normally through `create` — the
+/// new elevation gate must not interfere with the non-root route.
+#[test]
+fn create_without_root_mapping_still_links_ordinarily() {
+  let r = rig("");
+  r.make_pkg("app", &[".zshrc"]);
+
+  r.cmd().args(["create", "app", "--yes"]).assert().success();
+
+  let linked = r.home.join("target/.zshrc");
+  assert!(
+    linked.is_symlink() || linked.exists(),
+    "ordinary link created"
+  );
+  assert_eq!(fs::read_to_string(linked).unwrap(), "contents of .zshrc");
+}

@@ -242,6 +242,47 @@ fn prepare_elevation(
   Ok(elevation)
 }
 
+/// Build the elevation context for a set of plans through the same
+/// authorize -> probe -> preflight gate as `link`. Returns `None` on a dry run
+/// or when no plan carries root destinations. Shared with `create` so a
+/// root-mapped package linked during creation follows the identical path.
+pub(crate) fn prepare_elevation_for_plans(
+  plans: &[link::Plan],
+  configured: Option<&str>,
+  as_root: bool,
+  dry_run: bool,
+) -> Result<Option<Elevation>> {
+  let root_dsts: HashSet<PathBuf> = plans
+    .iter()
+    .flat_map(|p| p.root_dsts.iter().cloned())
+    .collect();
+  if dry_run || root_dsts.is_empty() {
+    return Ok(None);
+  }
+  let mut descriptions = Vec::new();
+  for plan in plans {
+    for action in &plan.actions {
+      if matches!(
+        action,
+        link::Action::RootLink { .. } | link::Action::RootFold { .. }
+      ) {
+        descriptions.push(render_action(action));
+      }
+    }
+    for conflict in &plan.conflicts {
+      if plan.root_dsts.contains(&conflict.dst) {
+        descriptions.push(format!("resolve root conflict {}", conflict.dst.display()));
+      }
+    }
+  }
+  Ok(Some(prepare_elevation(
+    descriptions,
+    root_dsts,
+    configured,
+    as_root,
+  )?))
+}
+
 struct App<'a> {
   globals: &'a GlobalArgs,
   resolved: config::ResolvedConfig,
@@ -315,36 +356,12 @@ impl<'a> App<'a> {
     // Root-mapped actions are authorized + preflighted before anything is
     // applied. Dry run never prompts and never elevates (dry-run wins, even
     // with --as-root).
-    let root_dsts: HashSet<PathBuf> = plans
-      .iter()
-      .flat_map(|p| p.root_dsts.iter().cloned())
-      .collect();
-    let elevation = if self.globals.dry_run || root_dsts.is_empty() {
-      None
-    } else {
-      let mut descriptions = Vec::new();
-      for plan in &plans {
-        for action in &plan.actions {
-          if matches!(
-            action,
-            link::Action::RootLink { .. } | link::Action::RootFold { .. }
-          ) {
-            descriptions.push(render_action(action));
-          }
-        }
-        for conflict in &plan.conflicts {
-          if plan.root_dsts.contains(&conflict.dst) {
-            descriptions.push(format!("resolve root conflict {}", conflict.dst.display()));
-          }
-        }
-      }
-      Some(prepare_elevation(
-        descriptions,
-        root_dsts,
-        self.resolved.cfg.elevate_cmd.as_deref(),
-        self.globals.as_root,
-      )?)
-    };
+    let elevation = prepare_elevation_for_plans(
+      &plans,
+      self.resolved.cfg.elevate_cmd.as_deref(),
+      self.globals.as_root,
+      self.globals.dry_run,
+    )?;
 
     let mut resolver = self.make_resolver();
     match link::apply_plans_with_elevation(
@@ -870,6 +887,8 @@ pub fn run(cli: Cli) -> Result<i32> {
         ignore_globs: app_state.resolved.cfg.ignore.clone(),
         package: app_state.resolved.cfg.package.clone(),
         conflict_resolver: app_state.make_resolver(),
+        elevate_cmd: app_state.resolved.cfg.elevate_cmd.clone(),
+        as_root: cli.global.as_root,
       };
       let opts = crate::create::CreateOptions {
         app,

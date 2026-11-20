@@ -29,10 +29,15 @@ pub struct CreateContext {
   pub fold: bool,
   pub fold_ignore: Vec<String>,
   pub ignore_globs: Vec<String>,
-  /// Per-package includes, so `create` links an existing package exactly as `link` would.
+  /// Per-package config (includes + root mappings), so `create` links an
+  /// existing package exactly as `link` would.
   pub package: std::collections::HashMap<String, crate::config::PackageConfig>,
   /// Same conflict policy as `link` (selected from global flags/config).
   pub conflict_resolver: Box<dyn ConflictResolver>,
+  /// Elevation helper for root-mapped steps (same config as `link`).
+  pub elevate_cmd: Option<String>,
+  /// `--as-root` from the global flags: authorize elevated steps non-interactively.
+  pub as_root: bool,
 }
 
 #[derive(Debug)]
@@ -569,20 +574,40 @@ fn link_existing(ctx: &mut CreateContext, app: &str) -> Result<CreateOutcome> {
   }
   let ignore = crate::ignore::Ignore::with_packages(&ctx.ignore_globs, &ctx.package)?;
   let pkgs = vec![app.to_string()];
-  let plans = link::plan_link_all(&link::LinkInput {
-    source: &ctx.source_dir,
-    target: &ctx.target,
-    pkgs: &pkgs,
-    fold: ctx.fold,
-    fold_ignore: &ctx.fold_ignore,
-    ignore: &ignore,
-  })?;
-  // conflicts abort with the full report (prebuilt by apply_plans); nothing is changed
-  link::apply_plans(
+  // Link the created package with its own root mappings, exactly as `link`
+  // would: a `[package.<name>.root]` table must be planned and elevated here
+  // too, not silently dropped on the create route.
+  let roots: link::RootMappings = ctx
+    .package
+    .get(app)
+    .and_then(|pc| pc.root.clone())
+    .map(|mappings| std::iter::once((app.to_string(), mappings)).collect())
+    .unwrap_or_default();
+  let plans = link::plan_link_all_with_roots(
+    &link::LinkInput {
+      source: &ctx.source_dir,
+      target: &ctx.target,
+      pkgs: &pkgs,
+      fold: ctx.fold,
+      fold_ignore: &ctx.fold_ignore,
+      ignore: &ignore,
+    },
+    &roots,
+  )?;
+  // Same authorize -> probe -> preflight gate as `link`, before any mutation.
+  let elevation = crate::cli::prepare_elevation_for_plans(
+    &plans,
+    ctx.elevate_cmd.as_deref(),
+    ctx.as_root,
+    ctx.dry_run,
+  )?;
+  // conflicts abort with the full report (prebuilt by apply); nothing is changed
+  link::apply_plans_with_elevation(
     &plans,
     &ctx.source_dir,
     ctx.conflict_resolver.as_mut(),
     false,
+    elevation.as_ref(),
   )?;
   println!("linked {app}");
   Ok(CreateOutcome {
