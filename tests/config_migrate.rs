@@ -525,3 +525,83 @@ fn init_force_semantics_unchanged_when_stowrc_is_absent() {
     rustow::config::print_default()
   );
 }
+
+#[test]
+fn init_force_adoption_uses_stowrc_values_not_existing_config() {
+  // --force replaces the config wholesale, so the old file's keys must not
+  // suppress adoption of the stowrc values (review F1).
+  let r = rig();
+  r.write_config("source = \"/keep\"\n");
+  r.write_stowrc(&r.stowrc_contents());
+
+  r.cmd()
+    .args(["config", "init", "--force", "--yes"])
+    .write_stdin("")
+    .assert()
+    .success()
+    .stdout(contains("stowrc -> config.toml"));
+
+  let text = fs::read_to_string(&r.cfg_path).unwrap();
+  assert!(
+    !text.contains("/keep"),
+    "old value should be replaced: {text}"
+  );
+  assert_eq!(
+    r.config_value("source")
+      .and_then(|v| v.as_str().map(str::to_owned)),
+    Some(r.source.to_string_lossy().into_owned())
+  );
+  assert_eq!(
+    r.config_value("target")
+      .and_then(|v| v.as_str().map(str::to_owned)),
+    Some(r.target.to_string_lossy().into_owned())
+  );
+  assert_eq!(
+    r.config_value("verbose").and_then(|v| v.as_bool()),
+    Some(false)
+  );
+}
+
+#[test]
+fn init_no_stowrc_flag_skips_adoption_offer() {
+  // The shipped kill-switch must silence the automatic init offer too (F2).
+  let r = rig();
+  r.write_stowrc(&r.stowrc_contents());
+
+  let out = r
+    .cmd()
+    .args(["config", "init", "--no-stowrc"])
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let stdout = String::from_utf8(out).unwrap();
+  assert!(!stdout.contains("[a]dopt"), "unexpected offer: {stdout}");
+  assert_eq!(
+    fs::read_to_string(&r.cfg_path).unwrap(),
+    rustow::config::print_default()
+  );
+}
+
+#[test]
+fn init_no_stowrc_env_skips_adoption_offer() {
+  let r = rig();
+  r.write_stowrc(&r.stowrc_contents());
+
+  let out = r
+    .cmd()
+    .args(["config", "init"])
+    .env("RUSTOW_NO_STOWRC", "1")
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+  let stdout = String::from_utf8(out).unwrap();
+  assert!(!stdout.contains("[a]dopt"), "unexpected offer: {stdout}");
+  assert_eq!(
+    fs::read_to_string(&r.cfg_path).unwrap(),
+    rustow::config::print_default()
+  );
+}

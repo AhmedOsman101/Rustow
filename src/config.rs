@@ -654,7 +654,8 @@ pub struct CliOverrides {
 
 /// Environment kill-switch for the `~/.stowrc` fallback.
 /// Truthy: 1, true, yes, on (case-insensitive). Everything else is false.
-fn env_no_stowrc() -> bool {
+/// `pub(crate)` so the automatic `config init` adoption offer can honor it too.
+pub(crate) fn env_no_stowrc() -> bool {
   match std::env::var("RUSTOW_NO_STOWRC") {
     Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
     Err(_) => false,
@@ -1255,12 +1256,30 @@ fn merge_top_level_keys(original: &str, lines: &[String]) -> String {
 /// function never writes anything — callers print [`MigratePlan::render_diff`]
 /// and, if the user agrees, [`MigratePlan::apply`].
 pub fn migrate_stowrc(config_path: &Path, stowrc_path: &Path) -> Result<MigratePlan> {
+  migrate_stowrc_inner(config_path, stowrc_path, false)
+}
+
+/// Build a plan as if `config_path` did not exist yet.
+///
+/// `config init --force` replaces the destination wholesale, so values in the
+/// old file must not suppress adoption of the stowrc values. Shares all
+/// validation and rendering with [`migrate_stowrc`]; nothing is written here
+/// and the stowrc is never modified.
+pub fn migrate_stowrc_for_fresh(config_path: &Path, stowrc_path: &Path) -> Result<MigratePlan> {
+  migrate_stowrc_inner(config_path, stowrc_path, true)
+}
+
+fn migrate_stowrc_inner(
+  config_path: &Path,
+  stowrc_path: &Path,
+  ignore_existing: bool,
+) -> Result<MigratePlan> {
   let contents = fs::read_to_string(stowrc_path).map_err(Error::io(stowrc_path))?;
   let parsed = parse_stowrc(&contents)?;
   // Malformed values are fatal only here; the runtime fallback still warns.
   let mut warnings = promote_malformed_stowrc_warnings(stowrc_path, &parsed.warnings)?;
 
-  let (config_text, config_existed) = if config_path.exists() {
+  let (config_text, config_existed) = if !ignore_existing && config_path.exists() {
     (
       fs::read_to_string(config_path).map_err(Error::io(config_path))?,
       true,

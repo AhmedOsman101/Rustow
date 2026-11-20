@@ -659,14 +659,18 @@ fn prompt_choice(prompt: &str) -> Result<bool> {
   ))
 }
 
+/// Shared opening of both adoption prompts (ADR 0004); the final choice token
+/// stays specific to each entry point.
+const ADOPT_PROMPT_PREFIX: &str = "adopt these values into config.toml? [a]dopt / ";
+
 /// Ask `[a]dopt / [s]kip` (`config migrate`).
 fn prompt_adopt() -> Result<bool> {
-  prompt_choice("adopt these values into config.toml? [a]dopt / [s]kip: ")
+  prompt_choice(&format!("{ADOPT_PROMPT_PREFIX}[s]kip: "))
 }
 
 /// Ask `[a]dopt / [k]eep defaults` (`config init`), reusing the same reader.
 fn prompt_init_adopt() -> Result<bool> {
-  prompt_choice("adopt these values into config.toml? [a]dopt / [k]eep defaults: ")
+  prompt_choice(&format!("{ADOPT_PROMPT_PREFIX}[k]eep defaults: "))
 }
 
 pub fn run(cli: Cli) -> Result<i32> {
@@ -679,10 +683,18 @@ pub fn run(cli: Cli) -> Result<i32> {
       ConfigCommands::Init { force, yes, path } => {
         let path = path.unwrap_or_else(config::config_path);
         let stowrc_path = config::stowrc_path();
-        if stowrc_path.exists() {
-          // Same shared seam as `config migrate`; init passes its destination
-          // path so the plan adopts only the values that path leaves unset.
-          let plan = config::migrate_stowrc(&path, &stowrc_path)?;
+        // The automatic offer must honor both shipped kill-switches; an
+        // explicit `config migrate` still reads a stowrc when asked.
+        let stowrc_off = cli.global.no_stowrc || config::env_no_stowrc();
+        if !stowrc_off && stowrc_path.exists() {
+          // Same shared seam as `config migrate`. With --force the config is
+          // being replaced, so plan against an empty destination: an old
+          // file's keys must not suppress stowrc values we are about to write.
+          let plan = if force {
+            config::migrate_stowrc_for_fresh(&path, &stowrc_path)?
+          } else {
+            config::migrate_stowrc(&path, &stowrc_path)?
+          };
           for w in &plan.warnings {
             eprintln!("rustow: warning: {w}");
           }
