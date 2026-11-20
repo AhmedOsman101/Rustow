@@ -12,12 +12,13 @@
 //! The planner writes nothing. Applying is idempotent and ordered
 //! (Unfold before children, Mkdir before descendants).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
+use crate::elevate::Elevation;
 use crate::error::{Error, Result};
 use crate::ignore::Ignore;
 use crate::platform;
@@ -54,7 +55,7 @@ pub fn scan_package(source: &Path, pkg: &str, ignore: &Ignore) -> Result<Vec<Ent
       Ok(p) => p.to_path_buf(),
       Err(_) => continue,
     };
-    if ignore.is_ignored(&rel) {
+    if ignore.is_ignored_for(pkg, &rel) {
       continue;
     }
     let ft = entry.file_type();
@@ -104,6 +105,19 @@ pub enum Action {
   SkipIdempotent {
     dst: PathBuf,
   },
+  /// Root-mapped file (ADR 0001): link one source file to an exact absolute
+  /// destination. Never folded, never refolded. Application/elevation is Task 19.
+  RootLink {
+    src: PathBuf,
+    dst: PathBuf,
+  },
+  /// Root-mapped directory (ADR 0001): a single fold-style symlink at
+  /// `<value>/<basename(src_dir)>`, folded against an absolute parent. Never
+  /// folded into the package's normal tree, never refolded. Task 19 applies it.
+  RootFold {
+    src_dir: PathBuf,
+    dst: PathBuf,
+  },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +163,9 @@ impl std::fmt::Display for Conflict {
 pub struct Plan {
   pub actions: Vec<Action>,
   pub conflicts: Vec<Conflict>,
+  /// Absolute destinations claimed by this plan's root-mapped actions (and
+  /// root conflicts). Used to keep root conflicts on the elevated path.
+  pub root_dsts: HashSet<PathBuf>,
 }
 
 /// Lexical normalization: resolves `.` and `..` components without touching the fs.
@@ -213,11 +230,16 @@ pub struct Planner<'a> {
   own_dir_claims: HashSet<PathBuf>,
   /// Destinations minted by the foreign re-link; own entries claiming them are cross-package collisions.
   claimed: HashSet<PathBuf>,
+  /// Package-relative paths that are root-mapped (ADR 0001). They are withheld
+  /// from the ordinary walk at every level: never folded over, never linked
+  /// into the target tree, never refolded.
+  root_paths: HashSet<PathBuf>,
   pub actions: Vec<Action>,
   pub conflicts: Vec<Conflict>,
 }
 
 impl<'a> Planner<'a> {
+  #[allow(clippy::too_many_arguments)]
   pub fn new(
     source: &'a Path,
     target: &'a Path,
@@ -226,6 +248,7 @@ impl<'a> Planner<'a> {
     ignore: &'a Ignore,
     block_fold: HashSet<PathBuf>,
     entries_dirs: Vec<PathBuf>,
+    root_paths: HashSet<PathBuf>,
   ) -> Self {
     let own_dir_claims: HashSet<PathBuf> = entries_dirs.into_iter().collect();
     Self {
@@ -238,9 +261,17 @@ impl<'a> Planner<'a> {
       unfolded: Vec::new(),
       own_dir_claims,
       claimed: HashSet::new(),
+      root_paths,
       actions: Vec::new(),
       conflicts: Vec::new(),
     }
+  }
+
+  fn is_root_mapped(&self, pkg_rel: &Path) -> bool {
+    self
+      .root_paths
+      .iter()
+      .any(|m| pkg_rel == m || pkg_rel.starts_with(m))
   }
 
   fn pkg_root(&self) -> PathBuf {
@@ -265,7 +296,7 @@ impl<'a> Planner<'a> {
   pub fn run(mut self, entries: &[Entry]) -> Plan {
     // only top-level entries here; directories plan their own children recursively
     for entry in entries {
-      if entry.pkg_rel.components().count() != 1 {
+      if entry.pkg_rel.components().count() != 1 || self.is_root_mapped(&entry.pkg_rel) {
         continue;
       }
       let dst = self.target.join(&entry.pkg_rel);
@@ -279,6 +310,7 @@ impl<'a> Planner<'a> {
     Plan {
       actions: self.actions,
       conflicts: self.conflicts,
+      root_dsts: HashSet::new(),
     }
   }
 
@@ -296,7 +328,9 @@ impl<'a> Planner<'a> {
         Ok(p) => pkg_rel.join(p),
         Err(_) => continue,
       };
-      if self.ignore.is_ignored(&rel) {
+      // A fold symlink would expose the whole subtree in the target tree, so
+      // never fold over a root-mapped path (same rule as ignored paths).
+      if self.is_root_mapped(&rel) || self.ignore.is_ignored_for(self.pkg, &rel) {
         return false;
       }
     }
@@ -423,7 +457,7 @@ impl<'a> Planner<'a> {
           continue;
         };
         let full_pkg_rel = prefix.join(&subtree_rel);
-        if self.ignore.is_ignored(&full_pkg_rel) {
+        if self.ignore.is_ignored_for(&foreign_pkg, &full_pkg_rel) {
           continue;
         }
         let child_dst = dst.join(&subtree_rel);
@@ -469,7 +503,8 @@ impl<'a> Planner<'a> {
     for child in children {
       let name = child.file_name();
       let child_pkg_rel = pkg_rel.join(&name);
-      if self.ignore.is_ignored(&child_pkg_rel) {
+      if self.is_root_mapped(&child_pkg_rel) || self.ignore.is_ignored_for(self.pkg, &child_pkg_rel)
+      {
         continue;
       }
       let child_abs = child.path();
@@ -673,12 +708,147 @@ fn validate_pkg(source: &Path, pkg: &str) -> Result<()> {
   Ok(())
 }
 
+/// Per-package root mappings (ADR 0001): package name -> (package-relative
+/// source path -> absolute destination). Values are already normalized by the
+/// config loader; trailing slashes are cosmetic and never decide the kind.
+pub type RootMappings = HashMap<String, BTreeMap<String, String>>;
+
+/// Resolve one `[package.<name>.root]` mapping to `(abs_src, dst, is_dir)`.
+/// The source path's *actual* filesystem type decides the mapping kind
+/// (ADR 0001, amended): a real directory folds to `<value>/<basename>`, a file
+/// (or symlink leaf) links to `value` exactly. This is shared by the planner
+/// and by unlink so both compute identical destinations.
+pub fn root_destination(
+  pkg: &str,
+  pkg_root: &Path,
+  key: &str,
+  value: &str,
+) -> Result<(PathBuf, PathBuf, bool)> {
+  let src_rel = lexical_normalize(Path::new(key));
+  let abs_src = lexical_normalize(&pkg_root.join(&src_rel));
+  let meta = fs::symlink_metadata(&abs_src).map_err(|_| {
+    Error::Config(format!(
+      "root mapping for package {pkg:?}: source path {} (key {key:?}) does not exist — nothing to link",
+      abs_src.display()
+    ))
+  })?;
+  let is_dir = meta.is_dir();
+  let dst = if is_dir {
+    let base = abs_src
+      .file_name()
+      .map(PathBuf::from)
+      .unwrap_or_else(|| abs_src.clone());
+    lexical_normalize(&PathBuf::from(value).join(base))
+  } else {
+    lexical_normalize(Path::new(value))
+  };
+  Ok((abs_src, dst, is_dir))
+}
+
+/// Candidate absolute destinations for one mapping, including when the mapped
+/// source has vanished. With the source present its filesystem type decides the
+/// single destination (ADR 0001, amended). Once the source is gone that type
+/// cannot be derived, so both spellings are returned to be matched against the
+/// link actually on disk: `value` (file-style) and
+/// `<value>/<basename(normalized key)>` (directory-style — slashes are cosmetic).
+pub fn root_dest_candidates(pkg: &str, pkg_root: &Path, key: &str, value: &str) -> Vec<PathBuf> {
+  if let Ok((_src, dst, _is_dir)) = root_destination(pkg, pkg_root, key, value) {
+    return vec![dst];
+  }
+  let value_path = PathBuf::from(value);
+  let mut out = vec![lexical_normalize(&value_path)];
+  let src_rel = lexical_normalize(Path::new(key));
+  if let Some(base) = src_rel.file_name() {
+    out.push(lexical_normalize(&value_path.join(base)));
+  }
+  out
+}
+
 pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
+  plan_link_all_with_roots(input, &RootMappings::new())
+}
+
+/// Like [`plan_link_all`], but also plans the per-package `[package.<name>.root]`
+/// mappings (ADR 0001). The source path's actual filesystem type decides the
+/// mapping kind here: a directory becomes one `RootFold` at
+/// `<value>/<basename(source-dir)>`; a file becomes one `RootLink` at `value`.
+/// A mapped source that does not exist is a clean plan-time error. Mapped paths
+/// are withheld from the ordinary walk (so they never fold, refold, or take
+/// part in fold decisions) but their absolute destinations still go through
+/// the same two-phase conflict detection.
+pub fn plan_link_all_with_roots(input: &LinkInput<'_>, roots: &RootMappings) -> Result<Vec<Plan>> {
   let mut pkg_entries: HashMap<String, Vec<Entry>> = HashMap::new();
+  let mut pkg_root_actions: HashMap<String, Vec<Action>> = HashMap::new();
+  let mut pkg_root_conflicts: HashMap<String, Vec<Conflict>> = HashMap::new();
+  let mut pkg_root_paths: HashMap<String, HashSet<PathBuf>> = HashMap::new();
+  let mut pkg_root_dsts: HashMap<String, HashSet<PathBuf>> = HashMap::new();
+  // Absolute root destinations claimed so far, across *all* packages.
+  let mut root_claims: HashMap<PathBuf, String> = HashMap::new();
+
   for pkg in input.pkgs {
     validate_pkg(input.source, pkg)?;
-    pkg_entries.insert(pkg.clone(), scan_package(input.source, pkg, input.ignore)?);
+    let entries = scan_package(input.source, pkg, input.ignore)?;
+    let pkg_root = input.source.join(pkg);
+    let mut mapped: Vec<(PathBuf, PathBuf)> = Vec::new(); // (package-relative source path, abs_src)
+    let mut root_actions = Vec::new();
+    let mut root_conflicts = Vec::new();
+    let mut root_dsts = HashSet::new();
+
+    // `roots` values are BTreeMap, so iteration (and thus action order) is
+    // deterministic by key. No slash-based decisions here: Path ignores a
+    // trailing slash on both the key and the value.
+    if let Some(mappings) = roots.get(pkg) {
+      for (key, value) in mappings {
+        let (abs_src, dst, is_dir) = root_destination(pkg, &pkg_root, key, value)?;
+
+        // Two packages claiming the same absolute root destination is a
+        // cross-package conflict, just like two packages claiming the same
+        // target-tree path. The second claimant gets the conflict.
+        if let Some(owner) = root_claims.get(&dst) {
+          root_conflicts.push(Conflict {
+            dst: dst.clone(),
+            reason: ConflictReason::CrossPackage,
+            src: Some(abs_src.clone()),
+            detail: Some(PathBuf::from(owner)),
+          });
+        } else {
+          root_claims.insert(dst.clone(), pkg.to_string());
+        }
+
+        probe_root_dst(&abs_src, &dst, &mut root_conflicts);
+        root_dsts.insert(dst.clone());
+        if is_dir {
+          root_actions.push(Action::RootFold {
+            src_dir: abs_src.clone(),
+            dst,
+          });
+        } else {
+          root_actions.push(Action::RootLink {
+            src: abs_src.clone(),
+            dst,
+          });
+        }
+        mapped.push((lexical_normalize(Path::new(key)), abs_src));
+      }
+    }
+
+    let root_paths: HashSet<PathBuf> = mapped.iter().map(|(rel, _)| rel.clone()).collect();
+    let entries: Vec<Entry> = entries
+      .into_iter()
+      .filter(|e| {
+        !mapped
+          .iter()
+          .any(|(rel, _)| e.pkg_rel == *rel || e.pkg_rel.starts_with(rel))
+      })
+      .collect();
+
+    pkg_entries.insert(pkg.clone(), entries);
+    pkg_root_actions.insert(pkg.clone(), root_actions);
+    pkg_root_conflicts.insert(pkg.clone(), root_conflicts);
+    pkg_root_paths.insert(pkg.clone(), root_paths);
+    pkg_root_dsts.insert(pkg.clone(), root_dsts);
   }
+
   let blocked = compute_blocked_folds(input.target, &pkg_entries);
   let mut cross = cross_package_conflicts(input.target, &pkg_entries);
 
@@ -699,14 +869,58 @@ pub fn plan_link_all(input: &LinkInput<'_>) -> Result<Vec<Plan>> {
       input.ignore,
       blocked.clone(),
       entries_dirs,
+      pkg_root_paths.get(pkg).cloned().unwrap_or_default(),
     );
     let mut plan = planner.run(&entries);
     if let Some(mut extra) = cross.remove(pkg) {
       plan.conflicts.append(&mut extra);
     }
+    if let Some(mut extra) = pkg_root_actions.remove(pkg) {
+      plan.actions.append(&mut extra);
+    }
+    if let Some(mut extra) = pkg_root_conflicts.remove(pkg) {
+      plan.conflicts.append(&mut extra);
+    }
+    plan.root_dsts = pkg_root_dsts.remove(pkg).unwrap_or_default();
     plans.push(plan);
   }
   Ok(plans)
+}
+
+/// Run a root-mapped destination through the same probe/conflict machinery as
+/// ordinary targets, but without fold candidacy: a root link/fold is a single
+/// symlink and is never unfolded or refolded.
+fn probe_root_dst(src: &Path, dst: &Path, conflicts: &mut Vec<Conflict>) {
+  match dst_probe(dst) {
+    Probe::Missing => {}
+    Probe::RealDir => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::DirFileMismatch,
+      src: Some(src.to_path_buf()),
+      detail: None,
+    }),
+    Probe::RealFile => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::Exists,
+      src: Some(src.to_path_buf()),
+      detail: None,
+    }),
+    Probe::Symlink(Some(resolved)) if resolved == lexical_normalize(src) => {
+      // already linked — idempotent, no conflict
+    }
+    Probe::Symlink(Some(resolved)) => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::ExternalSymlink,
+      src: Some(src.to_path_buf()),
+      detail: Some(resolved),
+    }),
+    Probe::Symlink(None) => conflicts.push(Conflict {
+      dst: dst.to_path_buf(),
+      reason: ConflictReason::DanglingExternal,
+      src: Some(src.to_path_buf()),
+      detail: None,
+    }),
+  }
 }
 
 // ---------------------------------------------------------------- apply
@@ -785,6 +999,20 @@ pub fn apply_plans(
   resolver: &mut dyn ConflictResolver,
   dry_run: bool,
 ) -> Result<ApplyOutcome> {
+  apply_plans_with_elevation(plans, source, resolver, dry_run, None)
+}
+
+/// Apply link plans, routing root-mapped actions through `elevate`. Authorization
+/// (y/n prompt or `--as-root`) and plan-time preflight are performed by the
+/// caller before this function; `elevate` is `None` only for runs with no
+/// root-mapped actions.
+pub fn apply_plans_with_elevation(
+  plans: &[Plan],
+  source: &Path,
+  resolver: &mut dyn ConflictResolver,
+  dry_run: bool,
+  elevate: Option<&Elevation>,
+) -> Result<ApplyOutcome> {
   // dry-run: never resolve, never touch the fs — just report the plan
   if dry_run {
     let mut out = ApplyOutcome {
@@ -796,7 +1024,10 @@ pub fn apply_plans(
       conflicts += plan.conflicts.len();
       for a in &plan.actions {
         match a {
-          Action::Link { .. } | Action::Fold { .. } => out.linked += 1,
+          Action::Link { .. }
+          | Action::Fold { .. }
+          | Action::RootLink { .. }
+          | Action::RootFold { .. } => out.linked += 1,
           Action::Repair { .. } => out.repaired += 1,
           _ => {}
         }
@@ -823,13 +1054,58 @@ pub fn apply_plans(
     return Err(Error::Conflicts(report));
   }
 
+  // Which kind of root action each absolute destination expects, so a root
+  // conflict resolved to Overwrite/Merge/Adopt stays on the elevated path.
+  enum RootKind {
+    Link,
+    Fold,
+  }
+  let mut root_kinds: HashMap<PathBuf, RootKind> = HashMap::new();
+  let mut all_root_dsts: HashSet<PathBuf> = HashSet::new();
+  for plan in plans {
+    all_root_dsts.extend(plan.root_dsts.iter().cloned());
+    for action in &plan.actions {
+      match action {
+        Action::RootLink { dst, .. } => {
+          root_kinds.insert(dst.clone(), RootKind::Link);
+        }
+        Action::RootFold { dst, .. } => {
+          root_kinds.insert(dst.clone(), RootKind::Fold);
+        }
+        _ => {}
+      }
+    }
+  }
+  if !all_root_dsts.is_empty() && elevate.is_none() {
+    return Err(Error::Config(
+      "root-mapped actions require an elevation context (internal error)".to_string(),
+    ));
+  }
+  let root_action_for = |dst: &Path, src: PathBuf| -> Action {
+    match root_kinds.get(dst) {
+      Some(RootKind::Fold) => Action::RootFold {
+        src_dir: src,
+        dst: dst.to_path_buf(),
+      },
+      _ => Action::RootLink {
+        src,
+        dst: dst.to_path_buf(),
+      },
+    }
+  };
+
   // 2. rewrite conflict actions into fs ops we can apply
   let mut actions: Vec<Action> = Vec::new();
   let mut adopted: Vec<(PathBuf, PathBuf)> = Vec::new(); // (target, package_src)
   let mut overwritten: Vec<PathBuf> = Vec::new();
   let mut skip_dsts: HashSet<PathBuf> = HashSet::new();
   let mut fixup_dsts: HashSet<PathBuf> = HashSet::new();
+  // Root destinations whose existing target must be removed via elevation.
+  let mut root_overwrites: HashSet<PathBuf> = HashSet::new();
+  // Root destinations that were "adopted" — really replaced, see warning below.
+  let mut root_adopts: Vec<PathBuf> = Vec::new();
   for (c, outcome) in outcomes {
+    let is_root = all_root_dsts.contains(&c.dst);
     let src = c.src.clone();
     match outcome {
       PromptOutcome::Skip => {
@@ -838,15 +1114,34 @@ pub fn apply_plans(
       PromptOutcome::Overwrite | PromptOutcome::Merge => {
         overwritten.push(c.dst.clone());
         fixup_dsts.insert(c.dst.clone());
+        if is_root {
+          root_overwrites.insert(c.dst.clone());
+        }
         if let Some(src) = src {
-          actions.push(Action::Link { src, dst: c.dst });
+          actions.push(if is_root {
+            root_action_for(&c.dst, src)
+          } else {
+            Action::Link { src, dst: c.dst }
+          });
         }
       }
       PromptOutcome::Adopt => {
         fixup_dsts.insert(c.dst.clone());
+        if is_root {
+          // An unprivileged process cannot preserve a root-owned file's
+          // content/ownership while moving it into the package. Replace it
+          // via elevation instead, and say so loudly.
+          overwritten.push(c.dst.clone());
+          root_overwrites.insert(c.dst.clone());
+          root_adopts.push(c.dst.clone());
+        }
         if let Some(src) = src {
-          adopted.push((c.dst.clone(), src.clone()));
-          actions.push(Action::Link { src, dst: c.dst });
+          if is_root {
+            actions.push(root_action_for(&c.dst, src));
+          } else {
+            adopted.push((c.dst.clone(), src.clone()));
+            actions.push(Action::Link { src, dst: c.dst });
+          }
         }
       }
       PromptOutcome::Abort => unreachable!("checked above"),
@@ -857,7 +1152,11 @@ pub fn apply_plans(
     for a in &plan.actions {
       match a {
         Action::SkipIdempotent { .. } => {}
-        Action::Link { dst, .. } | Action::Fold { dst, .. } | Action::Repair { dst, .. }
+        Action::Link { dst, .. }
+        | Action::Fold { dst, .. }
+        | Action::Repair { dst, .. }
+        | Action::RootLink { dst, .. }
+        | Action::RootFold { dst, .. }
           if skip_dsts.contains(dst) || fixup_dsts.contains(dst) =>
         {
           suppressed += 1;
@@ -871,6 +1170,12 @@ pub fn apply_plans(
   if suppressed > 0 {
     out_warnings.push(format!(
       "suppressed {suppressed} duplicate link action(s) at targets claimed by another package"
+    ));
+  }
+  for dst in &root_adopts {
+    out_warnings.push(format!(
+      "root-mapped destination {} was REPLACED, not adopted: a root-owned file's content and ownership cannot be preserved by an unprivileged process",
+      dst.display()
     ));
   }
   let mut out = ApplyOutcome {
@@ -918,13 +1223,21 @@ pub fn apply_plans(
       drop_actions.insert(target.clone());
       continue;
     } else if target.exists() || target.is_symlink() {
-      fs::remove_file(target).map_err(Error::io(target))?;
+      if root_overwrites.contains(target) {
+        elevate
+          .expect("root actions require elevation (checked above)")
+          .remove(target)?;
+      } else {
+        fs::remove_file(target).map_err(Error::io(target))?;
+      }
     }
   }
 
   // 4. execute actions in order (skipping adopts that were rejected)
   for action in actions.into_iter().filter(|a| match a {
-    Action::Link { dst, .. } => !drop_actions.contains(dst),
+    Action::Link { dst, .. } | Action::RootLink { dst, .. } | Action::RootFold { dst, .. } => {
+      !drop_actions.contains(dst)
+    }
     _ => true,
   }) {
     let action = &action;
@@ -965,6 +1278,12 @@ pub fn apply_plans(
         }
       }
       Action::SkipIdempotent { .. } => {}
+      Action::RootLink { src, dst } | Action::RootFold { src_dir: src, dst } => {
+        elevate
+          .expect("root actions require elevation (checked above)")
+          .apply_link(src, dst)?;
+        out.linked += 1;
+      }
     }
   }
   out.skipped = skip_dsts.len();
@@ -1019,7 +1338,7 @@ fn is_owned_link(dst: &Path, source: &Path) -> bool {
     .unwrap_or(false)
 }
 
-fn render_conflict_report(outcomes: &[(Conflict, PromptOutcome)]) -> String {
+pub(crate) fn render_conflict_report(outcomes: &[(Conflict, PromptOutcome)]) -> String {
   let mut out = String::from("rustow: conflicts detected — nothing was changed:\n");
   for (c, _) in outcomes {
     out.push_str(&format!("  {c}\n"));
@@ -1044,13 +1363,35 @@ pub struct UnlinkPlan {
   pub candidate_dirs: std::collections::HashSet<PathBuf>,
   /// Informational: entries found on disk that were NOT ours (left alone).
   pub foreign_skipped: Vec<PathBuf>,
+  /// Broken root-mapped links outside `target` (ADR 0001). `apply_unlink`
+  /// never touches these; the CLI removes them through the elevation helper.
+  pub root_actions: Vec<UnlinkAction>,
 }
 
 /// Sweep the *target* tree for symlinks pointing into `source` whose
 /// destinations are missing — the stow-style `stow -c`.
-/// Does not touch anything owned by another package or external to `source`.
-pub fn plan_clean(source: &Path, target: &Path, _ignore: &Ignore) -> Result<UnlinkPlan> {
+/// Never descends into `source` (or the ancestor dirs leading to it when it is
+/// nested under `target`), and skips links whose package-relative path is
+/// ignored. Does not touch anything owned by another package or external to
+/// `source`.
+pub fn plan_clean(source: &Path, target: &Path, ignore: &Ignore) -> Result<UnlinkPlan> {
+  plan_clean_with_roots(source, target, ignore, &RootMappings::new())
+}
+
+/// Like [`plan_clean`], but also sweeps broken root-mapped links (ADR 0001):
+/// symlinks at mapped absolute destinations whose source no longer exists.
+/// Live root links are left alone, and the broken ones go into
+/// `UnlinkPlan::root_actions` so the CLI can elevate their removal — this
+/// function only plans, it never touches the filesystem outside `target`.
+pub fn plan_clean_with_roots(
+  source: &Path,
+  target: &Path,
+  ignore: &Ignore,
+  roots: &RootMappings,
+) -> Result<UnlinkPlan> {
   let mut plan = UnlinkPlan::default();
+  let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| lexical_normalize(p));
+  let source_canon = canon(source);
   let mut stack = vec![target.to_path_buf()];
   while let Some(dir) = stack.pop() {
     let rd = match fs::read_dir(&dir) {
@@ -1064,19 +1405,59 @@ pub fn plan_clean(source: &Path, target: &Path, _ignore: &Ignore) -> Result<Unli
         Err(_) => continue,
       };
       if meta.is_symlink() {
-        if let Some(abs) = resolve_symlink(&path)
-          && abs.starts_with(source)
-          && !abs.exists()
-        {
-          plan
-            .actions
-            .push(UnlinkAction::Unlink { dst: path.clone() });
-          if let Some(parent) = path.parent() {
-            plan.candidate_dirs.insert(parent.to_path_buf());
-          }
+        let Some(abs) = resolve_symlink(&path) else {
+          continue;
+        };
+        if !abs.starts_with(source) || abs.exists() {
+          continue;
+        }
+        // `ignore` applies to the path inside the package the link points
+        // into: drop the `<source>/<pkg>` prefix first.
+        let Some(from_source) = abs.strip_prefix(source).ok() else {
+          continue;
+        };
+        let mut comps = from_source.components();
+        let Some(std::path::Component::Normal(_pkg)) = comps.next() else {
+          continue;
+        };
+        if ignore.is_ignored(&comps.collect::<PathBuf>()) {
+          continue;
+        }
+        plan
+          .actions
+          .push(UnlinkAction::Unlink { dst: path.clone() });
+        if let Some(parent) = path.parent() {
+          plan.candidate_dirs.insert(parent.to_path_buf());
         }
       } else if meta.is_dir() {
+        let dir_canon = canon(&path);
+        // Prune source itself, anything below it, and (when source lives under
+        // target) the ancestor chain that would lead the walk into it.
+        if dir_canon.starts_with(&source_canon) || source_canon.starts_with(&dir_canon) {
+          continue;
+        }
         stack.push(path);
+      }
+    }
+  }
+
+  // Root-mapped links live outside the target sweep. Treat them like any
+  // other owned link: only dangling ones are planned for removal, and only
+  // via the elevated path (the CLI applies them after authorization).
+  for (pkg, mappings) in roots {
+    let pkg_root = source.join(pkg);
+    for (key, value) in mappings {
+      for dst in root_dest_candidates(pkg, &pkg_root, key, value) {
+        let Some(resolved) = resolve_symlink(&dst) else {
+          continue;
+        };
+        if !resolved.starts_with(&pkg_root) || fs::metadata(&dst).is_ok() {
+          continue; // not ours, or still live — clean only removes broken links
+        }
+        let action = UnlinkAction::Unlink { dst: dst.clone() };
+        if !plan.root_actions.contains(&action) {
+          plan.root_actions.push(action);
+        }
       }
     }
   }
@@ -1094,6 +1475,29 @@ pub fn plan_unlink(
   ignore: &Ignore,
   dangling_only: bool,
 ) -> Result<UnlinkPlan> {
+  plan_unlink_with_roots(
+    source,
+    target,
+    pkgs,
+    ignore,
+    dangling_only,
+    &RootMappings::new(),
+  )
+}
+
+/// Like [`plan_unlink`], but excludes `[package.<name>.root]` paths (ADR 0001)
+/// from the ordinary target walk. A root-mapped path is managed at its absolute
+/// destination and removed there via elevation by the CLI; a leftover link in
+/// the user's home at the same relative path is not that mapped link and is
+/// left alone.
+pub fn plan_unlink_with_roots(
+  source: &Path,
+  target: &Path,
+  pkgs: &[String],
+  ignore: &Ignore,
+  dangling_only: bool,
+  roots: &RootMappings,
+) -> Result<UnlinkPlan> {
   let mut plan = UnlinkPlan::default();
   for pkg in pkgs {
     validate_pkg(source, pkg)?;
@@ -1101,6 +1505,15 @@ pub fn plan_unlink(
     if !pkg_root.is_dir() {
       return Err(Error::PackageNotFound(pkg.clone()));
     }
+    let mapped: HashSet<PathBuf> = roots
+      .get(pkg)
+      .map(|mappings| {
+        mappings
+          .keys()
+          .map(|key| lexical_normalize(Path::new(key)))
+          .collect()
+      })
+      .unwrap_or_default();
     // walk the package tree; real target dirs get recursed into
     walk_unlink(
       source,
@@ -1111,6 +1524,7 @@ pub fn plan_unlink(
       ignore,
       &mut plan,
       dangling_only,
+      &mapped,
     )?;
   }
   Ok(plan)
@@ -1126,6 +1540,7 @@ fn walk_unlink(
   ignore: &Ignore,
   plan: &mut UnlinkPlan,
   dangling_only: bool,
+  mapped: &HashSet<PathBuf>,
 ) -> Result<()> {
   let children: Vec<PathBuf> = match fs::read_dir(subdir_abs) {
     Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
@@ -1140,7 +1555,11 @@ fn walk_unlink(
       None => continue,
     };
     let pkg_rel = subdir_rel.join(name);
-    if ignore.is_ignored(&pkg_rel) {
+    if ignore.is_ignored(&pkg_rel)
+      || mapped
+        .iter()
+        .any(|rel| pkg_rel == *rel || pkg_rel.starts_with(rel))
+    {
       continue;
     }
     let dst = target.join(&pkg_rel);
@@ -1170,6 +1589,7 @@ fn walk_unlink(
           ignore,
           plan,
           dangling_only,
+          mapped,
         )?;
       }
       (false, Some(m)) if m.file_type().is_symlink() => {
@@ -1226,6 +1646,7 @@ pub fn refolded_dir(
     return None; // empty — handled by rmdir
   }
   let mut common: Option<PathBuf> = None;
+  let mut owner: Option<String> = None;
   for child in &children {
     let meta = fs::symlink_metadata(child).ok()?;
     if !meta.file_type().is_symlink() {
@@ -1247,6 +1668,10 @@ pub fn refolded_dir(
     if rest != rel || !source.join(pkg_name).is_dir() {
       return None; // not a <source>/<pkg>/<rel> shape — refuse to refold anything else
     }
+    // All children resolve into the same package subtree (checked by `common`
+    // below); remember its name so the ignore walk can apply that package's
+    // `includes` instead of only the global rules (ADR 0002).
+    owner = Some(pkg_name.to_string_lossy().into_owned());
     match &common {
       None => common = Some(pkg_dir),
       Some(c) if *c == pkg_dir => {}
@@ -1254,8 +1679,10 @@ pub fn refolded_dir(
     }
   }
   let package_dir = common?;
+  let owner = owner?;
   // never refold a subtree containing ignored paths (e.g. nested .git) —
-  // the spec's "ignored data is never exposed through a symlink" covers unlink too
+  // the spec's "ignored data is never exposed through a symlink" covers unlink
+  // too, including paths hidden by this package's `includes` (ADR 0002)
   for item in WalkDir::new(&package_dir)
     .follow_links(false)
     .into_iter()
@@ -1266,7 +1693,7 @@ pub fn refolded_dir(
       Ok(p) => p,
       Err(_) => continue,
     };
-    if ignore.is_ignored(&rel.join(sub)) {
+    if ignore.is_ignored_for(&owner, &rel.join(sub)) {
       return None;
     }
   }

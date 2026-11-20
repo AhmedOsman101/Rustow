@@ -3,9 +3,11 @@
 //! Precedence: CLI flags > env vars (DOTFILES_DIR/DOTFILES_TARGET) > config.toml >
 //! ~/.stowrc (only when no config.toml exists — see Task 3).
 
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use globset::GlobBuilder;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,130 @@ pub enum ConflictPolicy {
   Adopt,
 }
 
+/// Settings for a single package, keyed by its directory name under `source`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PackageConfig {
+  /// Biome-style list layered over the global `ignore` for this package only.
+  /// Positive globs re-include paths the global list hid; `!`-prefixed globs
+  /// hide them again. Absent means this package leaves the global list alone.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub includes: Option<Vec<String>>,
+  /// Absolute destinations for package-relative source paths (ADR 0001).
+  /// Keys are package-relative paths; values are absolute after `~` expansion.
+  /// Trailing slashes are cosmetic and normalized away at load. The file-vs-
+  /// directory kind is resolved from the source path's type at plan time.
+  #[serde(
+    default,
+    skip_serializing_if = "Option::is_none",
+    deserialize_with = "deserialize_root"
+  )]
+  pub root: Option<BTreeMap<String, String>>,
+}
+
+/// Normalize and validate one `[package.<name>.root]` mapping (ADR 0001).
+///
+/// - `key` is a package-relative source path. Absolute paths and `..`
+///   components are rejected (the same rules `create --path` uses to keep a
+///   path inside the package); cosmetic trailing slashes are stripped.
+/// - `value` is an absolute destination. A leading `~` expands to `home`; a
+///   value that is not absolute after expansion is rejected. Trailing slashes
+///   are stripped by the lexical normalization.
+///
+/// `home` is passed in explicitly so the pure logic can be tested without
+/// reading the real machine's HOME. Returns `(key, value)` normalized.
+pub fn normalize_root_mapping(key: &str, value: &str, home: &Path) -> Result<(String, String)> {
+  // Key: must stay inside the package (same rule as `create --path`).
+  if Path::new(key).is_absolute() || key.split('/').any(|c| c == "..") {
+    return Err(Error::Config(format!(
+      "root key {key:?} escapes the package (absolute paths and '..' are not allowed)"
+    )));
+  }
+  let key_norm = key
+    .split('/')
+    .filter(|c| !c.is_empty() && *c != ".")
+    .collect::<Vec<_>>()
+    .join("/");
+  if key_norm.is_empty() {
+    return Err(Error::Config(format!(
+      "root key {key:?} is empty (needs at least one path component)"
+    )));
+  }
+
+  // Value: expand a leading `~`, then require an absolute destination.
+  let expanded = match value.strip_prefix('~') {
+    Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+      format!("{}{rest}", home.to_string_lossy())
+    }
+    _ => value.to_string(),
+  };
+  if !Path::new(&expanded).is_absolute() {
+    return Err(Error::Config(format!(
+      "root key {key:?} has non-absolute destination {value:?} (after ~ expansion: {expanded:?})"
+    )));
+  }
+  let value_norm = crate::link::lexical_normalize(Path::new(&expanded))
+    .to_string_lossy()
+    .into_owned();
+  Ok((key_norm, value_norm))
+}
+
+/// Deserialize `[package.<name>.root]`, validating and normalizing every entry
+/// as it is loaded so malformed keys/values fail at config load time.
+fn deserialize_root<'de, D>(
+  deserializer: D,
+) -> std::result::Result<Option<BTreeMap<String, String>>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let raw = Option::<BTreeMap<String, String>>::deserialize(deserializer)?;
+  let Some(raw) = raw else {
+    return Ok(None);
+  };
+  let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+  let mut out = BTreeMap::new();
+  for (key, value) in raw {
+    let (key, value) =
+      normalize_root_mapping(&key, &value, &home).map_err(serde::de::Error::custom)?;
+    out.insert(key, value);
+  }
+  Ok(Some(out))
+}
+
+/// Compile one biome-style `includes` pattern.
+///
+/// A single leading `!` marks a re-exclusion; the remainder is a globset
+/// pattern with the same slash semantics as the global `ignore` list. The
+/// negation itself is interpreted when the effective matcher is built; this
+/// function only validates that the pattern is well-formed.
+pub fn compile_include_glob(pattern: &str) -> Result<globset::Glob> {
+  let glob = pattern.strip_prefix('!').unwrap_or(pattern);
+  GlobBuilder::new(glob)
+    .literal_separator(true)
+    .build()
+    .map_err(|e| Error::Config(format!("invalid include glob {pattern:?}: {e}")))
+}
+
+/// Deserialize the `[package.<name>]` table, validating every `includes`
+/// pattern as it is loaded so bad globs fail with the offending package key.
+fn deserialize_package_configs<'de, D>(
+  deserializer: D,
+) -> std::result::Result<HashMap<String, PackageConfig>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let packages = HashMap::<String, PackageConfig>::deserialize(deserializer)?;
+  for (name, package) in &packages {
+    if let Some(includes) = &package.includes {
+      for pattern in includes {
+        compile_include_glob(pattern)
+          .map_err(|e| serde::de::Error::custom(format!("package {name:?}: {e}")))?;
+      }
+    }
+  }
+  Ok(packages)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -78,6 +204,18 @@ pub struct Config {
   /// What to do when a real file already occupies a target path.
   #[serde(default)]
   pub on_conflict: ConflictPolicy,
+  /// Elevation program for root-mapped actions (ADR 0001). When unset, rustow
+  /// probes `sudo`, then `doas`. The program receives the action as its argv,
+  /// e.g. `<program> ln -s <src> <dst>`.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub elevate_cmd: Option<String>,
+  /// Per-package settings, keyed by package name (`[package.<name>]`).
+  #[serde(
+    default,
+    skip_serializing_if = "HashMap::is_empty",
+    deserialize_with = "deserialize_package_configs"
+  )]
+  pub package: HashMap<String, PackageConfig>,
 }
 
 fn default_target() -> PathBuf {
@@ -109,6 +247,8 @@ impl Default for Config {
       ignore: default_ignore(),
       diff_tool: None,
       on_conflict: ConflictPolicy::Prompt,
+      elevate_cmd: None,
+      package: HashMap::new(),
     }
   }
 }
@@ -150,8 +290,14 @@ pub fn load_file() -> Result<Option<Config>> {
 }
 
 /// The annotated default configuration, printed by `config default` and written by `config init`.
-pub const DEFAULT_CONFIG_TOML: &str = r#"# rustow — default configuration
-# Docs: https://github.com/othman-moussa/rustow
+///
+/// The docs URL is embedded from Cargo.toml's `repository` field, so the generated
+/// config cannot drift from the project's canonical repository.
+pub const DEFAULT_CONFIG_TOML: &str = concat!(
+  r#"# rustow — default configuration
+# Docs: "#,
+  env!("CARGO_PKG_REPOSITORY"),
+  r#"
 # Precedence: CLI flags > env vars (DOTFILES_DIR, DOTFILES_TARGET) > this file.
 
 # Stow directory; its direct subdirectories are the packages.
@@ -205,16 +351,39 @@ ignore = [
 #   overwrite — target is deleted; symlink to the package's version
 #   adopt     — target's content is moved into the package; symlink
 on_conflict = "prompt"
-"#;
+
+# Elevation program used ONLY for root-mapped actions (ADR 0001). It receives
+# the action as argv, e.g. `<program> ln -s <src> <dst>`. Unset = probe `sudo`,
+# then `doas`. Could be a path to a helper script (e.g. "/usr/local/bin/rustow-sudo").
+# elevate_cmd = "sudo"
+
+# Per-package settings. `includes` is a biome-style list layered over the
+# global `ignore` for ONE package: positive globs re-include paths the global
+# list hid, `!`-prefixed globs hide them again. Omitted = no change.
+# [package.my-app]
+# includes = ["**", "!**/*.local"]
+#
+# Root targeting (ADR 0001): map a package-relative source path to an absolute
+# destination outside the target root (e.g. a file under /etc). Keys must stay
+# inside the package (no `..`); values must be absolute after `~` expansion.
+# A trailing `/` on either side is cosmetic. The source path's filesystem type
+# decides the mapping kind at plan time: a directory root creates one symlink
+# at <value>/<basename>, a file root is linked at <value> exactly. Root-mapped
+# links may require elevation at apply time.
+# [package.my-app.root]
+# "configs/root" = "/etc/my-app/root"  # file → file
+# "configs/"     = "/etc/my-app/"      # directory → directory
+"#
+);
 
 /// Render the default configuration as a TOML string (parses as `Config`).
 pub fn print_default() -> String {
   DEFAULT_CONFIG_TOML.to_string()
 }
 
-/// Write the default configuration to `path` (creating parent dirs).
+/// Write `text` to `path` (creating parent dirs).
 /// Refuses to overwrite an existing file unless `force`.
-pub fn write_default(path: &Path, force: bool) -> Result<PathBuf> {
+fn write_config_text(path: &Path, force: bool, text: &str) -> Result<PathBuf> {
   if path.exists() && !force {
     return Err(Error::Message(format!(
       "{} already exists (use --force to overwrite)",
@@ -224,8 +393,14 @@ pub fn write_default(path: &Path, force: bool) -> Result<PathBuf> {
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent).map_err(Error::io(parent))?;
   }
-  fs::write(path, print_default()).map_err(Error::io(path))?;
+  fs::write(path, text).map_err(Error::io(path))?;
   Ok(path.to_path_buf())
+}
+
+/// Write the default configuration to `path` (creating parent dirs).
+/// Refuses to overwrite an existing file unless `force`.
+pub fn write_default(path: &Path, force: bool) -> Result<PathBuf> {
+  write_config_text(path, force, &print_default())
 }
 
 #[cfg(test)]
@@ -306,10 +481,10 @@ fn expand_tilde_and_vars(s: &str) -> String {
   while i < bytes.len() {
     match bytes[i] {
       b'\\' => {
-        // backslash escapes the next byte, if any
-        if i + 1 < bytes.len() {
-          out.push(bytes[i + 1] as char);
-          i += 2;
+        // backslash escapes the next code point, if any
+        if let Some(c) = s[i + 1..].chars().next() {
+          out.push(c);
+          i += 1 + c.len_utf8();
         } else {
           out.push('\\');
           i += 1;
@@ -479,7 +654,8 @@ pub struct CliOverrides {
 
 /// Environment kill-switch for the `~/.stowrc` fallback.
 /// Truthy: 1, true, yes, on (case-insensitive). Everything else is false.
-fn env_no_stowrc() -> bool {
+/// `pub(crate)` so the automatic `config init` adoption offer can honor it too.
+pub(crate) fn env_no_stowrc() -> bool {
   match std::env::var("RUSTOW_NO_STOWRC") {
     Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
     Err(_) => false,
@@ -840,6 +1016,18 @@ mod task3_tests {
   }
 
   #[test]
+  fn stowrc_escaped_non_ascii_codepoint() {
+    // A doubled backslash in the file survives shlex as one literal `\`, so
+    // expand_tilde_and_vars sees `\é` and must escape the whole code point.
+    let parsed = parse_stowrc("--dir=\\\\é/dotfiles\n").unwrap();
+    let source = parsed.source.unwrap();
+    assert_eq!(source.to_str(), Some("é/dotfiles"));
+    // Byte-wise escaping would yield Latin-1 "Ã" plus a stray "©".
+    let shown = source.to_string_lossy();
+    assert!(!shown.contains('Ã') && !shown.contains('©'));
+  }
+
+  #[test]
   fn stowrc_brace_form_expands() {
     let home = std::env::var("HOME").unwrap();
     let parsed = parse_stowrc("--dir=${HOME}/dotfiles/Configs\n").unwrap();
@@ -888,4 +1076,354 @@ mod task3_tests {
     silence_provenance_at(&stamp).unwrap();
     assert!(provenance_silenced_at(&stamp));
   }
+}
+
+// --- Task 21: shared stowrc adoption (ADR 0004) -----------------------------
+
+/// One value that would be adopted from stowrc into config.toml.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateAddition {
+  /// Top-level config key: `source`, `target`, or `verbose`.
+  pub key: &'static str,
+  /// Human-readable value for the printed diff (unquoted).
+  pub value: String,
+  /// TOML literal written to the file (quoted string or boolean).
+  pub toml: String,
+}
+
+/// A side-effect-free plan produced by [`migrate_stowrc`], reused by both
+/// `config migrate` and `config init`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigratePlan {
+  pub config_path: PathBuf,
+  pub stowrc_path: PathBuf,
+  /// Only the gaps: keys the config does not already set.
+  pub additions: Vec<MigrateAddition>,
+  /// Unsupported stowrc options, reported but never fatal.
+  pub warnings: Vec<String>,
+  /// Whether the destination config file existed when the plan was built.
+  pub config_existed: bool,
+}
+
+impl MigratePlan {
+  pub fn is_empty(&self) -> bool {
+    self.additions.is_empty()
+  }
+
+  /// The adoption diff printed by `config migrate` (and `config init`).
+  pub fn render_diff(&self) -> String {
+    let mut s = String::from("stowrc -> config.toml (only values config leaves unset):\n");
+    for a in &self.additions {
+      s.push_str(&format!("  + {} = {}\n", a.key, a.value));
+    }
+    s
+  }
+
+  /// Write the adopted values into the config file, preserving everything
+  /// already in it. Only top-level scalar keys are inserted, always before
+  /// the first table header so they stay at the document root.
+  pub fn apply(&self) -> Result<PathBuf> {
+    let original = if self.config_existed && self.config_path.exists() {
+      fs::read_to_string(&self.config_path).map_err(Error::io(&self.config_path))?
+    } else {
+      String::new()
+    };
+    let lines: Vec<String> = self
+      .additions
+      .iter()
+      .map(|a| format!("{} = {}", a.key, a.toml))
+      .collect();
+    let merged = merge_top_level_keys(&original, &lines);
+    if let Some(parent) = self.config_path.parent() {
+      fs::create_dir_all(parent).map_err(Error::io(parent))?;
+    }
+    fs::write(&self.config_path, merged).map_err(Error::io(&self.config_path))?;
+    Ok(self.config_path.clone())
+  }
+}
+
+/// Quote a string as a full TOML basic string via toml's own serializer, so
+/// control characters and other edge cases are escaped correctly (not just
+/// backslashes and quotes).
+fn quote_toml_string(s: &str) -> String {
+  toml::Value::String(s.to_owned()).to_string()
+}
+
+/// In the migration path only, a stowrc warning that reports a dropped/malformed
+/// value is fatal: ADR 0004 requires malformed stowrc to error cleanly with the
+/// config untouched. Unsupported-option warnings stay non-fatal (they are the
+/// runtime fallback's documented behavior and must not change here). The
+/// warning text already begins `stowrc line N:`, so the error names both the
+/// file and the line.
+fn promote_malformed_stowrc_warnings(
+  stowrc_path: &Path,
+  warnings: &[String],
+) -> Result<Vec<String>> {
+  let mut kept = Vec::with_capacity(warnings.len());
+  for w in warnings {
+    if w.contains("needs a value") {
+      return Err(Error::Config(format!(
+        "malformed stowrc {}: {w}",
+        stowrc_path.display()
+      )));
+    }
+    kept.push(w.clone());
+  }
+  Ok(kept)
+}
+
+/// Which top-level keys are explicitly present in the config text. An empty
+/// document has none. Parsing failures surface as a clean config error.
+fn present_top_level_keys(text: &str) -> Result<std::collections::HashSet<String>> {
+  if text.trim().is_empty() {
+    return Ok(std::collections::HashSet::new());
+  }
+  let table: toml::Table =
+    toml::from_str(text).map_err(|e| Error::Config(format!("failed to parse config.toml: {e}")))?;
+  Ok(table.into_iter().map(|(k, _)| k).collect())
+}
+
+/// The adopted stow `source` must already be a directory. A stowrc that parses
+/// but points at a moved/deleted stow dir must never become a config pointing
+/// at nothing (Review Focus #2).
+fn validate_migrate_source(path: &Path, key: &str) -> Result<()> {
+  if !path.is_dir() {
+    return Err(Error::Config(format!(
+      "stowrc {key} path {} does not exist or is not a directory — refusing to write a config pointing at nothing",
+      path.display()
+    )));
+  }
+  Ok(())
+}
+
+/// The adopted `target` need not exist yet — rustow creates a missing target
+/// root on link. It is only an error when the path exists but is not a
+/// directory; a missing target is reported as a warning instead.
+fn validate_migrate_target(path: &Path, warnings: &mut Vec<String>) -> Result<()> {
+  if path.exists() && !path.is_dir() {
+    return Err(Error::Config(format!(
+      "stowrc target path {} exists but is not a directory — refusing to write a config pointing at a file",
+      path.display()
+    )));
+  }
+  if !path.exists() {
+    warnings.push(format!(
+      "stowrc target {} does not exist yet — rustow will create it on link",
+      path.display()
+    ));
+  }
+  Ok(())
+}
+
+/// Insert `lines` (complete `key = value` statements) at the document root of
+/// `original`, preserving all existing text. They go before the first active
+/// table header (a line starting with `[`), or at the end when there is none.
+fn merge_top_level_keys(original: &str, lines: &[String]) -> String {
+  if lines.is_empty() {
+    return original.to_string();
+  }
+  let mut insertion = original.len();
+  let mut offset = 0usize;
+  for seg in original.split_inclusive('\n') {
+    if seg.trim_start().starts_with('[') {
+      insertion = offset;
+      break;
+    }
+    offset += seg.len();
+  }
+
+  let mut out = String::new();
+  out.push_str(&original[..insertion]);
+  if insertion == original.len() && !original.is_empty() && !original.ends_with('\n') {
+    out.push('\n');
+  }
+  for line in lines {
+    out.push_str(line);
+    out.push('\n');
+  }
+  if insertion < original.len() {
+    out.push('\n');
+  }
+  out.push_str(&original[insertion..]);
+  out
+}
+
+/// Build a migration plan from a stowrc file for a given destination config.
+///
+/// Reads and validates `stowrc_path`, then adopts only the values that the
+/// config at `config_path` leaves UNSET (`source`, `target`, `verbose`).
+/// Existing config values always win. The stowrc is never modified, and this
+/// function never writes anything — callers print [`MigratePlan::render_diff`]
+/// and, if the user agrees, [`MigratePlan::apply`].
+pub fn migrate_stowrc(config_path: &Path, stowrc_path: &Path) -> Result<MigratePlan> {
+  migrate_stowrc_inner(config_path, stowrc_path, false)
+}
+
+/// Build a plan as if `config_path` did not exist yet.
+///
+/// `config init --force` replaces the destination wholesale, so values in the
+/// old file must not suppress adoption of the stowrc values. Shares all
+/// validation and rendering with [`migrate_stowrc`]; nothing is written here
+/// and the stowrc is never modified.
+pub fn migrate_stowrc_for_fresh(config_path: &Path, stowrc_path: &Path) -> Result<MigratePlan> {
+  migrate_stowrc_inner(config_path, stowrc_path, true)
+}
+
+fn migrate_stowrc_inner(
+  config_path: &Path,
+  stowrc_path: &Path,
+  ignore_existing: bool,
+) -> Result<MigratePlan> {
+  let contents = fs::read_to_string(stowrc_path).map_err(Error::io(stowrc_path))?;
+  let parsed = parse_stowrc(&contents)?;
+  // Malformed values are fatal only here; the runtime fallback still warns.
+  let mut warnings = promote_malformed_stowrc_warnings(stowrc_path, &parsed.warnings)?;
+
+  let (config_text, config_existed) = if !ignore_existing && config_path.exists() {
+    (
+      fs::read_to_string(config_path).map_err(Error::io(config_path))?,
+      true,
+    )
+  } else {
+    (String::new(), false)
+  };
+  let present = present_top_level_keys(&config_text)?;
+
+  let mut additions = Vec::new();
+  if !present.contains("source")
+    && let Some(src) = &parsed.source
+  {
+    validate_migrate_source(src, "source")?;
+    additions.push(MigrateAddition {
+      key: "source",
+      value: src.to_string_lossy().into_owned(),
+      toml: quote_toml_string(&src.to_string_lossy()),
+    });
+  }
+  if !present.contains("target")
+    && let Some(tgt) = &parsed.target
+  {
+    validate_migrate_target(tgt, &mut warnings)?;
+    additions.push(MigrateAddition {
+      key: "target",
+      value: tgt.to_string_lossy().into_owned(),
+      toml: quote_toml_string(&tgt.to_string_lossy()),
+    });
+  }
+  if !present.contains("verbose")
+    && let Some(v) = parsed.verbose
+  {
+    additions.push(MigrateAddition {
+      key: "verbose",
+      value: v.to_string(),
+      toml: v.to_string(),
+    });
+  }
+
+  Ok(MigratePlan {
+    config_path: config_path.to_path_buf(),
+    stowrc_path: stowrc_path.to_path_buf(),
+    additions,
+    warnings,
+    config_existed,
+  })
+}
+
+#[cfg(test)]
+mod migrate_tests {
+  use super::*;
+
+  #[test]
+  fn merge_inserts_before_table_and_preserves_existing_text() {
+    let original = "# my config\nsource = \"/keep\"\n\n[package.foo]\nincludes = [\"**\"]\n";
+    let lines = vec![
+      "target = \"/new\"".to_string(),
+      "verbose = false".to_string(),
+    ];
+    let merged = merge_top_level_keys(original, &lines);
+    let parsed: toml::Table = toml::from_str(&merged).unwrap();
+    assert_eq!(parsed.get("source").unwrap().as_str(), Some("/keep"));
+    assert_eq!(parsed.get("target").unwrap().as_str(), Some("/new"));
+    assert_eq!(parsed.get("verbose").unwrap().as_bool(), Some(false));
+    assert!(merged.find("target = ").unwrap() < merged.find("[package.foo]").unwrap());
+    assert!(merged.starts_with("# my config"));
+  }
+
+  #[test]
+  fn merge_appends_to_empty_document() {
+    let merged = merge_top_level_keys("", &["source = \"/new\"".to_string()]);
+    assert_eq!(merged, "source = \"/new\"\n");
+  }
+
+  #[test]
+  fn quote_toml_string_uses_full_toml_escaping() {
+    let s = "C:\\a\"b\nc\td";
+    let quoted = quote_toml_string(s);
+    let table: toml::Table = toml::from_str(&format!("path = {quoted}\n")).unwrap();
+    assert_eq!(table.get("path").unwrap().as_str(), Some(s));
+  }
+
+  #[test]
+  fn malformed_value_warnings_are_fatal_but_unsupported_options_are_kept() {
+    let path = std::path::Path::new("/nonexistent/.stowrc");
+    let err =
+      promote_malformed_stowrc_warnings(path, &["stowrc line 7: --dir needs a value".to_string()])
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+      msg.contains("/nonexistent/.stowrc") && msg.contains("line 7"),
+      "{msg}"
+    );
+
+    let kept = promote_malformed_stowrc_warnings(
+      path,
+      &["stowrc line 2: ignoring unsupported option `--adopt`".to_string()],
+    )
+    .unwrap();
+    assert_eq!(kept.len(), 1);
+  }
+}
+
+// --- Task 22: inline adoption offer in `config init` (ADR 0004) -------------
+
+/// The annotated default config with a plan's adopted stowrc values merged in.
+///
+/// `source` and `target` are commented out in the default template, so they
+/// become active lines in place; `verbose` is active there, so it is replaced
+/// in place. The surrounding documentation is preserved and no key is
+/// duplicated. This is the file written when `config init` adopts a stowrc.
+pub fn default_with_adopted(plan: &MigratePlan) -> String {
+  let mut text = print_default();
+  for addition in &plan.additions {
+    let active = format!("{} = {}", addition.key, addition.toml);
+    let mut replaced = false;
+    let mut out = String::with_capacity(text.len() + active.len());
+    for seg in text.split_inclusive('\n') {
+      let trimmed = seg.trim_start();
+      // Match both the commented-out placeholders and active keys, but never
+      // prose that merely mentions a key name mid-sentence.
+      let body = trimmed.strip_prefix('#').unwrap_or(trimmed).trim_start();
+      let is_key = body
+        .strip_prefix(addition.key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='));
+      if is_key {
+        out.push_str(&active);
+        out.push('\n');
+        replaced = true;
+      } else {
+        out.push_str(seg);
+      }
+    }
+    text = out;
+    if !replaced {
+      text = merge_top_level_keys(&text, &[active]);
+    }
+  }
+  text
+}
+
+/// Write the documented default with a plan's adopted stowrc values. Same
+/// overwrite rules as [`write_default`]; the stowrc itself is never touched.
+pub fn write_default_with_adopted(path: &Path, force: bool, plan: &MigratePlan) -> Result<PathBuf> {
+  write_config_text(path, force, &default_with_adopted(plan))
 }

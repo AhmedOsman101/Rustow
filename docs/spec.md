@@ -12,6 +12,10 @@ The `status` command's design was informed by reading the status implementation 
 - `rustow` operates on `$HOME` only when the user explicitly invokes a command. There is no background behavior, no implicit scan-and-fix, and no "live home" guard beyond the normal conflict semantics — that _is_ the safety model.
 - No scripts are modified as part of this work (cutover is the user's manual decision).
 
+## Platform support
+
+rustow targets Unix-like systems. On Windows it is supported only under Git Bash / WSL / Cygwin; Windows is not a first-class target. Windows binaries keep shipping because they work in those environments — there is no separate native-Windows support (see [ADR 0007](./adr/0007-distribution.md)).
+
 ## Commands
 
 | Command                                     | Behavior                                                                                                                                                                                                                                                                                                                      |
@@ -25,8 +29,9 @@ The `status` command's design was informed by reading the status implementation 
 | `create <app>` (alias: `add`)               | See "create workflow" below.                                                                                                                                                                                                                                                                                                  |
 | `config default`                            | Print the annotated default config to stdout.                                                                                                                                                                                                                                                                                 |
 | `config init`                               | Write the default config to `$XDG_CONFIG_HOME/rustow/config.toml` (default `~/.config/rustow/config.toml`). Can pre-fill from an existing `.stowrc`/env when run interactively via the provenance prompt.                                                                                                                     |
+| `config migrate [--yes] [--dry-run] [--stowrc PATH]` | Adopt `~/.stowrc` values into `config.toml` without deleting the stowrc (ADR 0004); `--yes` skips the prompt, the global `--dry-run` previews, `--stowrc PATH` reads a custom stowrc.                                                                                                                  |
 
-Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`.
+Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--as-root` (authorize elevated root-mapped steps non-interactively; ADR 0001).
 
 ## Link semantics
 
@@ -61,10 +66,10 @@ GNU Stow-compatible subset, not a full clone:
 Table with columns `Package | Status | Notes`:
 
 - `Status`: `linked` | `partial` | `unlinked` | `conflict` (folded links count all subtree leaves as linked).
-- `Notes`: e.g. `3 not linked`, `2 conflicts`, `empty package`, or a short reason.
+- `Notes`: e.g. `3 not linked`, `2 conflicts`, `empty package`, or a short reason. A package with root mappings carries a `root` note; its mapped links are counted at their absolute destinations rather than in `target` (see "Root targeting").
 - No positional args -> all packages; package names -> filter.
 - `-s|--short`: print only the summary line.
-- `--json`: `{ "packages": [...], "summary": {...} }`.
+- `--json`: `{ "version": 1, "packages": [...], "summary": {...} }`. `version` is a top-level schema marker for machine consumers (ADR 0005); it is frozen for the v0.1 line and bumps only when the output shape changes in a breaking way. The field is additive — consumers that ignore unknown keys are unaffected.
 - Exit 0 iff every inspected package is `linked` and conflict-free; else 1.
 
 ## Config file
@@ -80,6 +85,8 @@ Table with columns `Package | Status | Notes`:
 | `ignore`      | list of glob              | GNU Stow 2.4.1's default ignore list                   | Added on top of the built-in list; matched against package-relative paths. The complete built-in default is present as the default value in the printed/initialized config. |
 | `diff_tool`   | string (command template) | unset                                                  | `{left}` / `{right}` placeholders, shlex-parsed. **Wins** over the registry and `$EDITOR`.                                                                                  |
 | `on_conflict` | string                    | `prompt`                                               | `prompt` (TTY) / `abort` / `skip` / `overwrite` / `adopt`. `prompt` escalates to `abort` when not a TTY.                                                                    |
+| `elevate_cmd` | string (command)          | unset (probe `sudo`, then `doas`)                      | Helper used for root-mapped actions only; an explicit bad value is an error, never a silent fallback (ADR 0001).                                                             |
+| `[package.<name>.root]` | table of string → string | unset                                        | Package-relative source path → absolute destination; see "Root targeting".                                                                                                    |
 
 **Precedence**: CLI flags -> env vars (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback **only** when no config.toml exists; supports `$VAR`/`${VAR}` expansion and `--dir`/`--target`/`--verbose`; `--ignore` not supported from stowrc). The stowrc fallback can be disabled entirely with `--no-stowrc` or `RUSTOW_NO_STOWRC=1` (then running with no config and no env vars fails with the source-not-set guidance, as if no stowrc existed).
 
@@ -93,6 +100,23 @@ Table with columns `Package | Status | Notes`:
 **Default config & schema**: `config default` prints the annotated default (including the complete stow default ignore list as its `ignore` value). `schema.json` is auto-generated at the repo root from the config struct (schemars); regenerated via mask task, checked in.
 
 **Env vars**: `DOTFILES_DIR` (source), `DOTFILES_TARGET` (target).
+
+## Root targeting (ADR 0001)
+
+Some paths belong at absolute locations outside `target`. A package opts in via config only — there is no CLI flag to designate a path:
+
+```toml
+[package.snapper.root]
+"configs" = "/etc/snapper"              # directory source -> symlink at /etc/snapper/configs
+"configs/root" = "/etc/snapper/root"    # file source -> the exact destination
+```
+
+- Keys are package-relative and may not escape the package (`..` is rejected); values must be absolute after `~` expansion.
+- The source path's **filesystem type** decides the mapping kind at plan time: a directory becomes ONE symlink at `<value>/<basename(source-dir)>`; a file becomes one symlink at `value` exactly. A trailing `/` on a key or value is cosmetic and never decides the kind. A mapped source that does not exist is a clean plan-time error.
+- Root-mapped paths are withheld from the ordinary walk: they never fold, never refold, and are excluded from the package's fold/link/unlink decisions. Their absolute destinations still go through the normal two-phase conflict detection.
+- `status` counts these links in the package's row with a `root` note. `unlink` removes exactly the mapped links at their absolute destinations, leaving user-home links at the same relative paths alone; `clean` treats them like any other owned link. Dry run lists root actions as `root link <dst> -> <src>` / `root fold <dst> -> <src>` and changes nothing.
+- Applying root-mapped actions needs write access the invoking user usually lacks. rustow probes `elevate_cmd` first, then `sudo`, then `doas`, and runs **only** those actions through the helper — never the whole run. The nearest existing parent directory must be writable at plan time; a failure aborts before any filesystem change.
+- Interactively, rustow lists the elevated actions and asks `proceed with elevated steps? [y/n]`; `n` aborts the whole run. On a non-TTY it fails with a hint naming `--as-root`. `--as-root` (global flag, all subcommands) authorizes elevated steps non-interactively, and `--dry-run` wins over it: no prompt, no elevation, no changes. Running as EUID 0 prints a loud warning that root's config and home apply, then follows the same rules.
 
 ## create workflow
 
@@ -147,11 +171,15 @@ Merge UX (real-file conflict, user picks `m`): message explaining they should ed
 
 ## Exit codes
 
-As implemented (and now relied on by scripts):
+Per [ADR 0003](./adr/0003-exit-codes.md) (binding contract):
 
-- `0` — success; for `status`, every inspected package is fully linked.
-- `1` — conflicts, status health failure, or any other error (printed to stderr).
-- `2` — user aborted (e.g. answered "abort" at a conflict prompt).
+| Code | Meaning                                                                                  |
+| ---- | ---------------------------------------------------------------------------------------- |
+| `0`  | Success (`status`: every inspected package fully linked and conflict-free)             |
+| `1`  | General failure: unresolved conflicts, runtime errors, and the user declining an interactive prompt |
+| `2`  | Usage error: unknown/malformed CLI arguments (clap's built-in behavior)                 |
+
+No separate meanings are invented. In particular, an interactive "abort" is not distinct from any other runtime failure; anyone who wants to distinguish them watches stderr, which always names the reason.
 
 ## Implementation layout
 
@@ -164,6 +192,7 @@ Single crate, lib + thin bin:
 - `src/ignore.rs` — built-in stow list + glob user ignores
 - `src/link.rs` — plan/apply for link (fold/unfold/conflicts), unlink (+refold), relink
 - `src/status.rs` — status computation/render (table, short, json)
+- `src/elevate.rs` — helper probe, plan-time preflight and elevated apply/removal for root-mapped actions (ADR 0001)
 - `src/create.rs` — create workflow
 - `src/diff.rs` — registry, selection, $EDITOR fallback, merge flow
 - `src/prompt.rs` — dialoguer wrappers (confirm, select, provenance)

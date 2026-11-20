@@ -25,6 +25,10 @@ Prebuilt binaries are attached to each [GitHub release](https://github.com/Ahmed
 | `rustow-macos-x64` / `rustow-macos-arm64`             | macOS x86_64 / Apple silicon |
 | `rustow-windows-x64.exe` / `rustow-windows-arm64.exe` | Windows x86_64 / arm64       |
 
+## Platform support
+
+rustow targets Unix-like systems. On Windows, use it under Git Bash / WSL / Cygwin — Windows is not a supported first-class target. Windows binaries still ship because they work in those environments, but native Windows behavior is not supported or tested (see [ADR 0007](./docs/adr/0007-distribution.md)).
+
 ## Quickstart
 
 Declare where your packages live (one directory per package) in `~/.config/rustow/config.toml`:
@@ -58,10 +62,23 @@ rustow reset             # remove all links
 | `create <app>` (alias `add`)             | Create a package, optionally adopting an existing target path                                                              |
 | `config default`                         | Print the annotated default config                                                                                         |
 | `config init`                            | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one) |
+| `config migrate [--yes] [--dry-run] [--stowrc PATH]` | Adopt stowrc values into `config.toml` without deleting the stowrc                                         |
 
-Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, `--target`.
+Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, `--target`, `--as-root` (authorize root-mapped steps without prompting).
 
 `unlink` requires at least one package argument; `reset` does everything at once. `relink` takes packages explicitly — there is no `relink` with no arguments (use `reset && sync`).
+
+## Exit codes
+
+rustow follows the Unix/clap convention ([ADR 0003](./docs/adr/0003-exit-codes.md)):
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Success. For `status`, every inspected package is fully linked and conflict-free. |
+| `1` | General failure: unresolved conflicts, runtime errors, or you declining an interactive prompt. |
+| `2` | Usage error: unknown or malformed arguments (clap's built-in behavior). |
+
+There is no separate code for "user aborted" — declining a prompt is just a runtime failure. stderr always names the reason, so scripts that need to tell cases apart should read it.
 
 ## Link semantics
 
@@ -101,7 +118,7 @@ Per-file adoption in bulk: `rustow link --adopt <pkg>` is equivalent to stow's `
 ╰─────────┴──────────┴────────────────╯
 ```
 
-Exit code is `0` iff every inspected package is fully linked and conflict-free, otherwise `1`. `rustow status eza` filters to specific packages. `--short` prints a one-line summary; `--json` prints machine-readable output.
+Exit code is `0` iff every inspected package is fully linked and conflict-free, otherwise `1`. `rustow status eza` filters to specific packages. `--short` prints a one-line summary; `--json` prints machine-readable output. Packages with root-mapped links carry a `root` note and count those links at their absolute destinations ([ADR 0001](./docs/adr/0001-root-targeting.md)).
 
 ## create
 
@@ -133,18 +150,38 @@ rustow create mytool --source /path/to/files --path .config/mytool
 | `ignore`      | GNU Stow 2.4.1 default list | Glob patterns matched against package-relative paths, added to the built-in list                                                     |
 | `diff_tool`   | unset                       | Command template for the merge diff tool, e.g. `"nvim -d {left} {right}"` or `"hx --new {left} {right}"`; wins over registry/$EDITOR |
 | `on_conflict` | `prompt`                    | `prompt` / `abort` / `skip` / `overwrite` / `adopt` (`prompt` escalates to abort on non-TTY)                                         |
+| `elevate_cmd` | unset (`sudo`, then `doas`) | Helper for root-mapped actions only, probed in that order when unset                                                                |
+| `[package.<name>.root]` | unset              | Map package-relative paths to absolute destinations outside `target` (see "Root targeting")                                         |
 
 Precedence: CLI flags -> env (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback only when no config file exists; `$VAR`/`~` expansion). `--no-stowrc` or `RUSTOW_NO_STOWRC=1` disables the `~/.stowrc` fallback completely.
 
 Without a config file you'll see a warning naming what's being used instead; on a TTY you can create one pre-filled from the values in use, or silence the notice permanently (`[s]ilence`). `~/.stowrc` is supported for the transition away from GNU Stow.
 
+### Migrating from GNU Stow
+
+`rustow config migrate` adopts the values rustow already reads from `~/.stowrc` (`source`, `target`, `verbose`) into `config.toml`, filling only what the config leaves unset. It is interactive by default; `--yes` adopts without asking and `--dry-run` (the global flag) previews the change. `--stowrc PATH` reads a stowrc from elsewhere. The stowrc is **left untouched** — it is inert once a config file exists, so it can be deleted separately at your leisure ([ADR 0004](./docs/adr/0004-config-migrate.md)).
+
 Schema for editors: [`schema.json`](./schema.json). The full annotated default: [`docs/config.toml`](./docs/config.toml).
+
+## Root targeting
+
+Paths that belong outside your home directory are configured per package — there is no CLI flag to opt a path in:
+
+```toml
+[package.snapper.root]
+"configs" = "/etc/snapper"              # directory -> one symlink at /etc/snapper/configs
+"configs/root" = "/etc/snapper/root"    # file -> the exact destination
+```
+
+Keys are package-relative (no `..` escapes); values are absolute after `~` expansion. The source path's filesystem type decides the kind at plan time: a directory becomes a single fold-style symlink at `<value>/<basename(source-dir)>`, a file links to the exact value. A trailing `/` is cosmetic and never decides the kind; a missing mapped source is a plan-time error. Mapped paths never fold or refold. `status` shows them with a `root` note, `unlink` removes exactly those mapped links (leaving user-home links at the same relative paths alone), and `clean` treats them like other owned links.
+
+Applying root-mapped steps needs elevated write access. rustow probes `elevate_cmd`, then `sudo`, then `doas`, and runs **only** those steps through the helper — never the whole command. Parent-directory writability and helper availability are checked at plan time; a failure aborts before anything changes. On a TTY rustow lists the steps and asks `proceed with elevated steps? [y/n]` (`n` aborts everything); on a non-TTY it fails with a hint naming `--as-root`. `--as-root` authorizes the steps non-interactively, while `--dry-run` wins over it and only lists the root actions (`root link …` / `root fold …`). Running as root prints a warning that root's config and home apply. This is a linker that can write system paths — review the plan before authorizing it ([ADR 0001](./docs/adr/0001-root-targeting.md)).
 
 ## Safety model
 
 - Every mutation is planned first; conflicts abort before any write.
 - Nothing is ever deleted except links rustow (or a compatible stow) created — foreign symlinks and real files are never touched without an explicit `-f`/overwrite choice.
-- `--dry-run` previews all of the above.
+- `--dry-run` previews all of the above, including root actions, and never prompts or elevates.
 - Unlink removes only links pointing into the package (then re-folds link-only directories and removes empty directories it created). It never follows foreign symlinks.
 - Ignored paths (the built-in default list — e.g. `.git` — plus your `ignore` globs) are never linked, and never appear through folded symlinks either.
 

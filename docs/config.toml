@@ -1,5 +1,5 @@
 # rustow — default configuration
-# Docs: https://github.com/othman-moussa/rustow
+# Docs: https://github.com/AhmedOsman101/Rustow
 # Precedence: CLI flags > env vars (DOTFILES_DIR, DOTFILES_TARGET) > this file.
 
 # Stow directory; its direct subdirectories are the packages.
@@ -53,3 +53,25 @@ ignore = [
 #   overwrite — target is deleted; symlink to the package's version
 #   adopt     — target's content is moved into the package; symlink
 on_conflict = "prompt"
+
+# Elevation program used ONLY for root-mapped actions (ADR 0001). It receives
+# the action as argv, e.g. `<program> ln -s <src> <dst>`. Unset = probe `sudo`,
+# then `doas`. Could be a path to a helper script (e.g. "/usr/local/bin/rustow-sudo").
+# elevate_cmd = "sudo"
+
+# Per-package settings. `includes` is a biome-style list layered over the
+# global `ignore` for ONE package: positive globs re-include paths the global
+# list hid, `!`-prefixed globs hide them again. Omitted = no change.
+# [package.my-app]
+# includes = ["**", "!**/*.local"]
+#
+# Root targeting (ADR 0001): map a package-relative source path to an absolute
+# destination outside the target root (e.g. a file under /etc). Keys must stay
+# inside the package (no `..`); values must be absolute after `~` expansion.
+# A trailing `/` on either side is cosmetic. The source path's filesystem type
+# decides the mapping kind at plan time: a directory root creates one symlink
+# at <value>/<basename>, a file root is linked at <value> exactly. Root-mapped
+# links may require elevation at apply time.
+# [package.my-app.root]
+# "configs/root" = "/etc/my-app/root"  # file → file
+# "configs/"     = "/etc/my-app/"      # directory → directory

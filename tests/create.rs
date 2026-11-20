@@ -10,6 +10,7 @@ struct Rig {
   source: std::path::PathBuf,
   target: std::path::PathBuf,
   xdg: std::path::PathBuf,
+  home: std::path::PathBuf,
 }
 
 fn rig() -> Rig {
@@ -17,14 +18,17 @@ fn rig() -> Rig {
   let source = tmp.path().join("Configs");
   let target = tmp.path().join("home");
   let xdg = tmp.path().join("xdg");
+  let home = tmp.path().join("userhome");
   fs::create_dir_all(&source).unwrap();
   fs::create_dir_all(&target).unwrap();
   fs::create_dir_all(&xdg).unwrap();
+  fs::create_dir_all(&home).unwrap();
   Rig {
     _tmp: tmp,
     source,
     target,
     xdg,
+    home,
   }
 }
 
@@ -32,6 +36,7 @@ impl Rig {
   fn cmd(&self) -> Command {
     let mut cmd = Command::cargo_bin("rustow").unwrap();
     cmd
+      .env("HOME", &self.home)
       .env("XDG_CONFIG_HOME", &self.xdg)
       .env("XDG_CACHE_HOME", &self.xdg)
       .env("DOTFILES_DIR", &self.source)
@@ -230,6 +235,20 @@ fn create_verbose_shows_files() {
   let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
   assert!(stderr.contains("a.vim"));
   assert!(stderr.contains("b.vim"));
+  // -v emits one indented, size-annotated list line per moved file (§5.2.3).
+  let listed: Vec<&str> = stderr
+    .lines()
+    .filter(|line| line.starts_with("  "))
+    .collect();
+  assert_eq!(listed.len(), 2, "stderr: {stderr}");
+  for file in ["a.vim", "b.vim"] {
+    assert!(
+      listed
+        .iter()
+        .any(|line| line.contains(file) && line.contains('(') && line.contains(')')),
+      "expected an indented '  <file> (<size>)' list line for {file:?}; stderr: {stderr}"
+    );
+  }
 }
 
 #[test]
@@ -321,4 +340,62 @@ fn create_merge_partial_conflict_nothing_moved() {
     fs::read_to_string(r.target.join(".config/mytool/newfile.conf")).unwrap(),
     "brand new"
   );
+}
+
+// --- F1: create must never relocate files already managed by another package
+#[test]
+fn create_refuses_source_inside_source_tree() {
+  let r = rig();
+  // base ships nvim config; linking it folds ~/.config into base's tree
+  write_file(&r.source, "base/.config/nvim/init.vim", "from base");
+  write_file(&r.source, "base/.bashrc", "export BASE=1");
+  r.cmd().args(["link", "base"]).assert().success();
+  assert!(r.target.join(".config").is_symlink());
+
+  // target/.config/nvim is now a symlink into base/.config/nvim — adopting it
+  // would move base's files into the new package
+  let out = r
+    .cmd()
+    .args(["create", "nvim", "--path", ".config/nvim", "--yes"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert!(stderr.contains("base"), "stderr: {stderr}");
+
+  // base's files survived untouched, and no nvim package was populated
+  assert_eq!(
+    fs::read_to_string(r.source.join("base/.config/nvim/init.vim")).unwrap(),
+    "from base"
+  );
+  assert!(!r.source.join("nvim/.config/nvim/init.vim").exists());
+}
+
+#[test]
+fn create_refuses_explicit_source_inside_source_tree() {
+  let r = rig();
+  write_file(&r.source, "base/.config/nvim/init.vim", "from base");
+  write_file(&r.source, "otherpkg/.config/nvim/init.vim", "from otherpkg");
+
+  let out = r
+    .cmd()
+    .args([
+      "create",
+      "nvim",
+      "--path",
+      ".config/nvim",
+      "--source",
+      r.source.join("otherpkg/.config/nvim").to_str().unwrap(),
+      "--yes",
+    ])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+  assert!(stderr.contains("otherpkg"), "stderr: {stderr}");
+
+  // the sibling package's tree was not relocated
+  assert_eq!(
+    fs::read_to_string(r.source.join("otherpkg/.config/nvim/init.vim")).unwrap(),
+    "from otherpkg"
+  );
+  assert!(!r.source.join("nvim/.config/nvim/init.vim").exists());
 }
