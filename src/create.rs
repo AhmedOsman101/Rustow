@@ -266,12 +266,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// If `candidate` resolves (lexically or, when it exists, through symlinks) to
-/// a path inside the source tree, return the owning package name. Under a fold,
+/// a path inside `source_dir`, return the owning package name. Under a fold,
 /// `target/.config/<app>` is a symlink into another package's tree — adopting it
 /// would silently relocate that package's files.
-fn package_owning_path(ctx: &CreateContext, candidate: &Path) -> Option<String> {
-  let source_lex = crate::link::lexical_normalize(&ctx.source_dir);
-  let source_canon = fs::canonicalize(&ctx.source_dir).unwrap_or_else(|_| source_lex.clone());
+fn package_owning_path(source_dir: &Path, candidate: &Path) -> Option<String> {
+  let source_lex = crate::link::lexical_normalize(source_dir);
+  let source_canon = fs::canonicalize(source_dir).unwrap_or_else(|_| source_lex.clone());
   let candidate_lex = crate::link::lexical_normalize(candidate);
   let candidate_canon = fs::canonicalize(candidate).unwrap_or_else(|_| candidate_lex.clone());
 
@@ -285,6 +285,33 @@ fn package_owning_path(ctx: &CreateContext, candidate: &Path) -> Option<String> 
     }
   }
   None
+}
+
+/// Single guard for every `create` adoption route: the implicit target path,
+/// `--source`, and the interactive TTY prompter. Refuse a candidate that is the
+/// package itself (or an ancestor of it), and any candidate that really lives
+/// inside the source tree — those files belong to a package and moving them
+/// would relocate it. Both checks resolve lexically and through symlinks.
+fn guard_adoption(source_dir: &Path, pkg: &Path, candidate: &Path, label: &str) -> Result<()> {
+  let pkg_lex = crate::link::lexical_normalize(pkg);
+  let candidate_lex = crate::link::lexical_normalize(candidate);
+  let pkg_canon = fs::canonicalize(pkg).unwrap_or_else(|_| pkg_lex.clone());
+  let candidate_canon = fs::canonicalize(candidate).unwrap_or_else(|_| candidate_lex.clone());
+  let overlaps = |a: &Path, b: &Path| a == b || a.starts_with(b) || b.starts_with(a);
+  if overlaps(&candidate_lex, &pkg_lex) || overlaps(&candidate_canon, &pkg_canon) {
+    return Err(Error::Message(format!(
+      "{label} {} must not be the package itself or an ancestor of it",
+      candidate.display()
+    )));
+  }
+
+  if let Some(owner) = package_owning_path(source_dir, candidate) {
+    return Err(Error::Message(format!(
+      "source {} is inside the source tree and belongs to package {owner:?}; refusing to adopt a path already managed by a package",
+      candidate.display()
+    )));
+  }
+  Ok(())
 }
 
 pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<CreateOutcome> {
@@ -312,32 +339,11 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
   let pkg = pkg_dir(ctx, app);
   let dst = dst_for(ctx, app, relpath);
   let src = src_for(ctx, app, relpath, opts.source.as_deref());
-  // --source must never be the package dir, the package's ancestors (incl. source root), or inside it.
-  // Compare both lexically and (when the paths exist) through symlinks.
+  // Every adoption route goes through the same guard, before any fs mutation.
   if let Some(explicit) = opts.source.as_ref() {
-    let pkg_lex = crate::link::lexical_normalize(&pkg);
-    let src_lex = crate::link::lexical_normalize(explicit);
-    let pkg_canon = fs::canonicalize(&pkg).unwrap_or_else(|_| pkg_lex.clone());
-    let src_canon = fs::canonicalize(explicit).unwrap_or_else(|_| src_lex.clone());
-    let overlaps = |a: &Path, b: &Path| a == b || a.starts_with(b) || b.starts_with(a);
-    if overlaps(&src_lex, &pkg_lex) || overlaps(&src_canon, &pkg_canon) {
-      return Err(Error::Message(format!(
-        "--source {} must not be the package itself or an ancestor of it",
-        explicit.display()
-      )));
-    }
-  }
-
-  // Never adopt a path that actually lives inside the source tree: it belongs
-  // to a package, and moving it would relocate that package's files. Resolve
-  // the effective source lexically AND through symlinks (a folded ~/.config).
-  if !opts.empty
-    && let Some(owner) = package_owning_path(ctx, &src)
-  {
-    return Err(Error::Message(format!(
-      "source {} is inside the source tree and belongs to package {owner:?}; refusing to adopt a path already managed by a package",
-      src.display()
-    )));
+    guard_adoption(&ctx.source_dir, &pkg, explicit, "--source")?;
+  } else if !opts.empty {
+    guard_adoption(&ctx.source_dir, &pkg, &src, "source")?;
   }
 
   // both flags → error
@@ -521,6 +527,7 @@ pub fn plan_create(ctx: &mut CreateContext, opts: &CreateOptions) -> Result<Crea
             explicit.display()
           )));
         }
+        guard_adoption(&ctx.source_dir, &pkg, &explicit, "source")?;
         let files = list_files(&explicit)?;
         eprintln!(
           "source {}\ndestination {}\n{} files, {}",
@@ -626,4 +633,70 @@ fn print_pkg_summary(pkg: &Path, verbose: bool) -> Result<()> {
     }
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // The interactive TTY branch is not black-box testable without a PTY; these
+  // tests pin the shared guard it calls, which is the same guard used by the
+  // implicit-path and --source routes (covered end-to-end in tests/create.rs).
+
+  #[test]
+  fn guard_adoption_refuses_path_inside_source_tree_and_names_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("Configs");
+    let owned = source.join("base/.config/nvim");
+    fs::create_dir_all(&owned).unwrap();
+    let pkg = source.join("nvim");
+
+    let err = guard_adoption(&source, &pkg, &owned, "source").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("base"), "{msg}");
+    assert!(msg.contains("inside the source tree"), "{msg}");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn guard_adoption_refuses_symlink_into_source_tree_and_names_owner() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("Configs");
+    let owned = source.join("base/.config/nvim");
+    fs::create_dir_all(&owned).unwrap();
+    let home = tmp.path().join("home/.config");
+    fs::create_dir_all(&home).unwrap();
+    symlink(&owned, home.join("nvim")).unwrap();
+    let pkg = source.join("nvim");
+
+    let err = guard_adoption(&source, &pkg, &home.join("nvim"), "source").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("base"), "{msg}");
+    assert!(msg.contains("inside the source tree"), "{msg}");
+  }
+
+  #[test]
+  fn guard_adoption_allows_unrelated_target_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("Configs");
+    let pkg = source.join("nvim");
+    let unrelated = tmp.path().join("home/.config/nvim");
+    fs::create_dir_all(&unrelated).unwrap();
+
+    guard_adoption(&source, &pkg, &unrelated, "source").unwrap();
+  }
+
+  #[test]
+  fn guard_adoption_refuses_package_itself_with_caller_label() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("Configs");
+    let pkg = source.join("nvim");
+    fs::create_dir_all(&pkg).unwrap();
+
+    let err = guard_adoption(&source, &pkg, &pkg, "--source").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("--source"), "{msg}");
+    assert!(msg.contains("must not be the package itself"), "{msg}");
+  }
 }
