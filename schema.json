@@ -121,6 +121,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "root": {
+          "description": "Absolute destinations for package-relative source paths (ADR 0001).\nKeys are package-relative paths; values are absolute after `~` expansion.\nTrailing slashes are cosmetic and normalized away at load. The file-vs-\ndirectory kind is resolved from the source path's type at plan time.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

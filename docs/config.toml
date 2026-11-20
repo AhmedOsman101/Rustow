@@ -59,3 +59,14 @@ on_conflict = "prompt"
 # list hid, `!`-prefixed globs hide them again. Omitted = no change.
 # [package.my-app]
 # includes = ["**", "!**/*.local"]
+#
+# Root targeting (ADR 0001): map a package-relative source path to an absolute
+# destination outside the target root (e.g. a file under /etc). Keys must stay
+# inside the package (no `..`); values must be absolute after `~` expansion.
+# A trailing `/` on either side is cosmetic. The source path's filesystem type
+# decides the mapping kind at plan time: a directory root creates one symlink
+# at <value>/<basename>, a file root is linked at <value> exactly. Root-mapped
+# links may require elevation at apply time.
+# [package.my-app.root]
+# "configs/root" = "/etc/my-app/root"  # file → file
+# "configs/"     = "/etc/my-app/"      # directory → directory

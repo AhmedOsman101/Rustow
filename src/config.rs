@@ -3,7 +3,7 @@
 //! Precedence: CLI flags > env vars (DOTFILES_DIR/DOTFILES_TARGET) > config.toml >
 //! ~/.stowrc (only when no config.toml exists — see Task 3).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -60,6 +60,85 @@ pub struct PackageConfig {
   /// hide them again. Absent means this package leaves the global list alone.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub includes: Option<Vec<String>>,
+  /// Absolute destinations for package-relative source paths (ADR 0001).
+  /// Keys are package-relative paths; values are absolute after `~` expansion.
+  /// Trailing slashes are cosmetic and normalized away at load. The file-vs-
+  /// directory kind is resolved from the source path's type at plan time.
+  #[serde(
+    default,
+    skip_serializing_if = "Option::is_none",
+    deserialize_with = "deserialize_root"
+  )]
+  pub root: Option<BTreeMap<String, String>>,
+}
+
+/// Normalize and validate one `[package.<name>.root]` mapping (ADR 0001).
+///
+/// - `key` is a package-relative source path. Absolute paths and `..`
+///   components are rejected (the same rules `create --path` uses to keep a
+///   path inside the package); cosmetic trailing slashes are stripped.
+/// - `value` is an absolute destination. A leading `~` expands to `home`; a
+///   value that is not absolute after expansion is rejected. Trailing slashes
+///   are stripped by the lexical normalization.
+///
+/// `home` is passed in explicitly so the pure logic can be tested without
+/// reading the real machine's HOME. Returns `(key, value)` normalized.
+pub fn normalize_root_mapping(key: &str, value: &str, home: &Path) -> Result<(String, String)> {
+  // Key: must stay inside the package (same rule as `create --path`).
+  if Path::new(key).is_absolute() || key.split('/').any(|c| c == "..") {
+    return Err(Error::Config(format!(
+      "root key {key:?} escapes the package (absolute paths and '..' are not allowed)"
+    )));
+  }
+  let key_norm = key
+    .split('/')
+    .filter(|c| !c.is_empty() && *c != ".")
+    .collect::<Vec<_>>()
+    .join("/");
+  if key_norm.is_empty() {
+    return Err(Error::Config(format!(
+      "root key {key:?} is empty (needs at least one path component)"
+    )));
+  }
+
+  // Value: expand a leading `~`, then require an absolute destination.
+  let expanded = match value.strip_prefix('~') {
+    Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+      format!("{}{rest}", home.to_string_lossy())
+    }
+    _ => value.to_string(),
+  };
+  if !Path::new(&expanded).is_absolute() {
+    return Err(Error::Config(format!(
+      "root key {key:?} has non-absolute destination {value:?} (after ~ expansion: {expanded:?})"
+    )));
+  }
+  let value_norm = crate::link::lexical_normalize(Path::new(&expanded))
+    .to_string_lossy()
+    .into_owned();
+  Ok((key_norm, value_norm))
+}
+
+/// Deserialize `[package.<name>.root]`, validating and normalizing every entry
+/// as it is loaded so malformed keys/values fail at config load time.
+fn deserialize_root<'de, D>(
+  deserializer: D,
+) -> std::result::Result<Option<BTreeMap<String, String>>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let raw = Option::<BTreeMap<String, String>>::deserialize(deserializer)?;
+  let Some(raw) = raw else {
+    return Ok(None);
+  };
+  let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+  let mut out = BTreeMap::new();
+  for (key, value) in raw {
+    let (key, value) =
+      normalize_root_mapping(&key, &value, &home).map_err(serde::de::Error::custom)?;
+    out.insert(key, value);
+  }
+  Ok(Some(out))
 }
 
 /// Compile one biome-style `includes` pattern.
@@ -272,6 +351,17 @@ on_conflict = "prompt"
 # list hid, `!`-prefixed globs hide them again. Omitted = no change.
 # [package.my-app]
 # includes = ["**", "!**/*.local"]
+#
+# Root targeting (ADR 0001): map a package-relative source path to an absolute
+# destination outside the target root (e.g. a file under /etc). Keys must stay
+# inside the package (no `..`); values must be absolute after `~` expansion.
+# A trailing `/` on either side is cosmetic. The source path's filesystem type
+# decides the mapping kind at plan time: a directory root creates one symlink
+# at <value>/<basename>, a file root is linked at <value> exactly. Root-mapped
+# links may require elevation at apply time.
+# [package.my-app.root]
+# "configs/root" = "/etc/my-app/root"  # file → file
+# "configs/"     = "/etc/my-app/"      # directory → directory
 "#
 );
 

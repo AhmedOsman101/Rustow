@@ -240,6 +240,7 @@ mod tests {
       "alpha".to_string(),
       PackageConfig {
         includes: includes.map(|v| v.into_iter().map(str::to_string).collect()),
+        root: None,
       },
     );
     map
