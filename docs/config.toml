@@ -2,6 +2,9 @@
 # Docs: https://github.com/AhmedOsman101/Rustow
 # Precedence: CLI flags > env vars (DOTFILES_DIR, DOTFILES_TARGET) > this file.
 
+# Get editor completions based on the config schema
+"$schema" = "https://raw.githubusercontent.com/AhmedOsman101/Rustow/refs/heads/main/schema.json"
+
 # Stow directory; its direct subdirectories are the packages.
 # REQUIRED — rustow refuses to run until it is set (no built-in default).
 # source = "~/dotfiles/Configs"

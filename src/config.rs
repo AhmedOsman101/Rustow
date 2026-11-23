@@ -13,6 +13,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+/// Single source of truth for the config schema URL: the annotated default
+/// config, the JSON schema, and the runtime `Config` field all use this value.
+macro_rules! config_schema_url {
+  () => {
+    "https://raw.githubusercontent.com/AhmedOsman101/Rustow/refs/heads/main/schema.json"
+  };
+}
+pub const CONFIG_SCHEMA_URL: &str = config_schema_url!();
+
 /// GNU Stow 2.4.1's default ignore list, verbatim from `default-ignore-list`.
 /// Slashless patterns match path segments (basename); slashed patterns match
 /// `/`-prefixed package-relative paths.
@@ -178,6 +187,10 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+  /// JSON schema URL for editor completions; written into the default config.
+  #[serde(default, rename = "$schema", skip_serializing_if = "Option::is_none")]
+  #[schemars(default = "default_schema")]
+  pub schema: Option<String>,
   /// Stow directory; its direct subdirectories are the packages.
   /// No default — rustow errors out until it is set.
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +239,11 @@ fn default_target() -> PathBuf {
 fn default_target_schema() -> PathBuf {
   PathBuf::from("$HOME")
 }
+
+/// Schema-only default for the `$schema` key; runtime configs leave it unset.
+fn default_schema() -> Option<String> {
+  Some(CONFIG_SCHEMA_URL.to_string())
+}
 fn default_verbose() -> bool {
   true
 }
@@ -239,6 +257,7 @@ fn default_ignore() -> Vec<String> {
 impl Default for Config {
   fn default() -> Self {
     Self {
+      schema: None,
       source: None,
       target: default_target(),
       verbose: default_verbose(),
@@ -291,14 +310,20 @@ pub fn load_file() -> Result<Option<Config>> {
 
 /// The annotated default configuration, printed by `config default` and written by `config init`.
 ///
-/// The docs URL is embedded from Cargo.toml's `repository` field, so the generated
-/// config cannot drift from the project's canonical repository.
+/// The docs URL is embedded from Cargo.toml's `repository` field, and the
+/// `$schema` URL comes from `CONFIG_SCHEMA_URL`, so neither can drift from the
+/// project's generated files.
 pub const DEFAULT_CONFIG_TOML: &str = concat!(
   r#"# rustow — default configuration
 # Docs: "#,
   env!("CARGO_PKG_REPOSITORY"),
   r#"
 # Precedence: CLI flags > env vars (DOTFILES_DIR, DOTFILES_TARGET) > this file.
+
+# Get editor completions based on the config schema
+"$schema" = ""#,
+  config_schema_url!(),
+  r#""
 
 # Stow directory; its direct subdirectories are the packages.
 # REQUIRED — rustow refuses to run until it is set (no built-in default).

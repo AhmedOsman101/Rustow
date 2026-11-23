@@ -3,6 +3,14 @@
   "title": "Config",
   "type": "object",
   "properties": {
+    "$schema": {
+      "description": "JSON schema URL for editor completions; written into the default config.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": "https://raw.githubusercontent.com/AhmedOsman101/Rustow/refs/heads/main/schema.json"
+    },
     "diff_tool": {
       "description": "Command template for the merge diff tool, e.g. \"meld {left} {right}\".\nWins over the built-in registry and $EDITOR when set.",
       "type": [
