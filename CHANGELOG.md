@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0](https://github.com/AhmedOsman101/Rustow/compare/v0.2.0...v0.3.0) (2026-11-23)
+
+
+### Features
+
+* **config:** emit config schema key in default config and schema ([fb40034](https://github.com/AhmedOsman101/Rustow/commit/fb40034a04e6cd186e6d5cf40d5a77225076df96))
+
 ## [0.2.0](https://github.com/AhmedOsman101/Rustow/compare/rustow-v0.1.4...rustow-v0.2.0) (2026-11-20)
 
 
