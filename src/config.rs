@@ -438,6 +438,10 @@ mod tests {
     assert_eq!(cfg.ignore, default_ignore());
     assert_eq!(cfg.ignore.len(), 16);
     assert!(cfg.source.is_none());
+    assert!(
+      cfg.schema.is_none(),
+      "$schema is a hint, not a runtime setting"
+    );
     assert!(cfg.verbose);
     assert!(cfg.fold);
     assert_eq!(cfg.on_conflict, ConflictPolicy::Prompt);
