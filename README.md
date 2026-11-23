@@ -51,17 +51,17 @@ rustow reset             # remove all links
 
 ## Commands
 
-| Command                                  | Description                                                                                                                |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `sync`                                   | Link all packages in `source`                                                                                              |
-| `link <pkg>...`                          | Link specific packages                                                                                                     |
-| `unlink <pkg>...` (alias `remove`, `rm`) | Unlink packages                                                                                                            |
-| `reset`                                  | Unlink all packages                                                                                                        |
-| `relink <pkg>...`                        | Unlink then re-link (restow)                                                                                               |
-| `status [pkg...]`                        | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable; `--state <linked\|partial\|unlinked\|conflict>`to filter (repeatable; applies to`--json`too);`-v`per-issue text detail (capped per package);`-vv` uncapped | `create <app>` (alias `add`)             | Create a package, optionally adopting an existing target path                                                              |
-| `config default`                         | Print the annotated default config                                                                                         |
-| `config init`                            | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one) |
-| `config migrate [--yes] [--dry-run] [--stowrc PATH]` | Adopt stowrc values into `config.toml` without deleting the stowrc                                         |
+| Command                                              | Description                                                                                                                                                                                                                                   |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync`                                               | Link all packages in `source`                                                                                                                                                                                                                 |
+| `link <pkg>...`                                      | Link specific packages                                                                                                                                                                                                                        |
+| `unlink <pkg>...` (alias `remove`, `rm`)             | Unlink packages                                                                                                                                                                                                                               |
+| `reset`                                              | Unlink all packages                                                                                                                                                                                                                           |
+| `relink <pkg>...`                                    | Unlink then re-link (restow)                                                                                                                                                                                                                  |
+| `status [pkg...]`                                    | Table of `Package / Status / Notes`; `-s` summary only; `--json` machine-readable; `--state <linked\|partial\|unlinked\|conflict>`to filter (repeatable; applies to`--json`too);`-v`per-issue text detail (capped per package);`-vv` uncapped | `create <app>` (alias `add`) | Create a package, optionally adopting an existing target path |
+| `config default`                                     | Print the annotated default config                                                                                                                                                                                                            |
+| `config init`                                        | Write the default config (use `--prefill` was not added; run interactively via the provenance prompt for a pre-filled one)                                                                                                                    |
+| `config migrate [--yes] [--dry-run] [--stowrc PATH]` | Adopt stowrc values into `config.toml` without deleting the stowrc                                                                                                                                                                            |
 
 Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, `--target`, `--as-root` (authorize root-mapped steps without prompting).
 
@@ -71,11 +71,11 @@ Global flags: `-n|--dry-run`, `-f|--force`, `--adopt`, `-v|--verbose`, `--dir`, 
 
 rustow follows the Unix/clap convention ([ADR 0003](./docs/adr/0003-exit-codes.md)):
 
-| Code | Meaning |
-| ---- | ------- |
-| `0` | Success. For `status`, every inspected package is fully linked and conflict-free. |
-| `1` | General failure: unresolved conflicts, runtime errors, or you declining an interactive prompt. |
-| `2` | Usage error: unknown or malformed arguments (clap's built-in behavior). |
+| Code | Meaning                                                                                        |
+| ---- | ---------------------------------------------------------------------------------------------- |
+| `0`  | Success. For `status`, every inspected package is fully linked and conflict-free.              |
+| `1`  | General failure: unresolved conflicts, runtime errors, or you declining an interactive prompt. |
+| `2`  | Usage error: unknown or malformed arguments (clap's built-in behavior).                        |
 
 There is no separate code for "user aborted" — declining a prompt is just a runtime failure. stderr always names the reason, so scripts that need to tell cases apart should read it.
 
@@ -140,17 +140,17 @@ rustow create mytool --source /path/to/files --path .config/mytool
 
 `~/.config/rustow/config.toml`. All keys optional except `source`:
 
-| Key           | Default                     | Notes                                                                                                                                |
-| ------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `source`      | _(required — no default)_   | Stow dir; direct subdirectories are packages                                                                                         |
-| `target`      | `$HOME`                     | Link destination root                                                                                                                |
-| `verbose`     | `true`                      |                                                                                                                                      |
-| `fold`        | `true`                      | Fold directories into single symlinks (`false` = GNU Stow's `--no-folding`)                                                          |
-| `ignore`      | GNU Stow 2.4.1 default list | Glob patterns matched against package-relative paths, added to the built-in list                                                     |
-| `diff_tool`   | unset                       | Command template for the merge diff tool, e.g. `"nvim -d {left} {right}"` or `"hx --new {left} {right}"`; wins over registry/$EDITOR |
-| `on_conflict` | `prompt`                    | `prompt` / `abort` / `skip` / `overwrite` / `adopt` (`prompt` escalates to abort on non-TTY)                                         |
-| `elevate_cmd` | unset (`sudo`, then `doas`) | Helper for root-mapped actions only, probed in that order when unset                                                                |
-| `[package.<name>.root]` | unset              | Map package-relative paths to absolute destinations outside `target` (see "Root targeting")                                         |
+| Key                     | Default                     | Notes                                                                                                                                |
+| ----------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `source`                | _(required — no default)_   | Stow dir; direct subdirectories are packages                                                                                         |
+| `target`                | `$HOME`                     | Link destination root                                                                                                                |
+| `verbose`               | `true`                      |                                                                                                                                      |
+| `fold`                  | `true`                      | Fold directories into single symlinks (`false` = GNU Stow's `--no-folding`)                                                          |
+| `ignore`                | GNU Stow 2.4.1 default list | Glob patterns matched against package-relative paths, added to the built-in list                                                     |
+| `diff_tool`             | unset                       | Command template for the merge diff tool, e.g. `"nvim -d {left} {right}"` or `"hx --new {left} {right}"`; wins over registry/$EDITOR |
+| `on_conflict`           | `prompt`                    | `prompt` / `abort` / `skip` / `overwrite` / `adopt` (`prompt` escalates to abort on non-TTY)                                         |
+| `elevate_cmd`           | unset (`sudo`, then `doas`) | Helper for root-mapped actions only, probed in that order when unset                                                                 |
+| `[package.<name>.root]` | unset                       | Map package-relative paths to absolute destinations outside `target` (see "Root targeting")                                          |
 
 Precedence: CLI flags -> env (`DOTFILES_DIR`, `DOTFILES_TARGET`) -> `config.toml` -> `~/.stowrc` (fallback only when no config file exists; `$VAR`/`~` expansion). `--no-stowrc` or `RUSTOW_NO_STOWRC=1` disables the `~/.stowrc` fallback completely.
 
